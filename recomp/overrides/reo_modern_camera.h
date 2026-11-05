@@ -36,22 +36,29 @@ struct Addresses {
     uint32_t overlayBase;  // overlay holding the camera apply function
     uint32_t overlayId;
     uint32_t cameraApply;  // projection + look-at
+    uint32_t fov;          // float read by cameraApply; vertical FOV = fov * fovScale radians
+    uint32_t fovScale;     // overlay 0 constant multiplying fov
 };
-inline constexpr Addresses File1{0x19f6c0u, 0x324100u, 0x4a5c30u, 0x10e0u, 0x4badedu,
-                                 0x4badd0u, 0x3243dcu, 0x324138u, 0x370000u, 1u, 0x375920u};
+inline constexpr Addresses File1{0x19f6c0u, 0x324100u, 0x4a5c30u, 0x10e0u, 0x4badedu, 0x4badd0u,
+                                 0x3243dcu, 0x324138u, 0x370000u, 1u, 0x375920u, 0x324180u, 0x38ca80u};
 
 inline Addresses game = File1;
 inline bool probe = false;
 inline bool enabled = false;
 
-// Follow camera, in guest units (Y up, floor at actor Y).
+// Follow camera, in guest units (Y up, floor at actor Y, roughly centimetres).
+// Framing follows modern over-the-shoulder games: the character sits in the left
+// third, the eye is near head height and looks almost level, with a fixed FOV
+// instead of each room camera's own. REO_MODERN_CAMERA_RIG overrides the values
+// as "distance,height,side,lookAhead,lookHeight,fovDegrees,follow" for tuning.
 struct Rig {
-    float distance = 260.0f; // behind the character
-    float height = 185.0f;   // eye above the character's feet
-    float side = 35.0f;      // shoulder offset to the right
-    float lookAhead = 160.0f;
-    float lookHeight = 135.0f;
-    float follow = 0.08f;    // yaw smoothing per camera update
+    float distance = 150.0f;  // behind the character
+    float height = 165.0f;    // eye above the character's feet
+    float side = 55.0f;       // shoulder offset to the right
+    float lookAhead = 450.0f; // look point ahead of the character
+    float lookHeight = 125.0f;
+    float fovDegrees = 52.0f; // vertical
+    float follow = 0.06f;     // yaw smoothing per camera update
 };
 inline Rig rig;
 inline float yaw = 0.0f;
@@ -89,6 +96,15 @@ inline void wf32(uint8_t* ram, uint32_t address, float value) {
     std::memcpy(ram + address, &value, 4);
 }
 
+inline void applyFov(uint8_t* ram) {
+    const float scale = f32(ram, game.fovScale);
+    if (!std::isfinite(scale) || scale <= 0.0f)
+        return;
+    const float value = rig.fovDegrees * 0.01745329252f / scale;
+    if (std::isfinite(value) && value > 0.0f)
+        wf32(ram, game.fov, value);
+}
+
 inline bool follow(uint8_t* ram) {
     if (ram[game.gameState] != 2u || ram[game.localSlot] >= 4u)
         return false;
@@ -116,6 +132,13 @@ inline bool follow(uint8_t* ram) {
     wf32(ram, game.eye + 0xcu, x + fx * rig.lookAhead + rx * rig.side);
     wf32(ram, game.eye + 0x10u, y + rig.lookHeight);
     wf32(ram, game.eye + 0x14u, z + fz * rig.lookAhead + rz * rig.side);
+    applyFov(ram);
+    if (probe) {
+        static unsigned calls = 0;
+        if (++calls % 120 == 1)
+            std::fprintf(stderr, "[MODCAM-FOV] scale=%.6f value=%.4f degrees=%.1f\n", f32(ram, game.fovScale),
+                         f32(ram, game.fov), rig.fovDegrees);
+    }
     return true;
 }
 
@@ -142,6 +165,16 @@ inline void install(PS2Runtime& runtime, Addresses addresses = File1) {
     enabled = flag("REO_MODERN_CAMERA");
     if (!probe && !enabled)
         return;
+    if (const char* text = std::getenv("REO_MODERN_CAMERA_RIG")) {
+        Rig custom = rig;
+        if (std::sscanf(text, "%f,%f,%f,%f,%f,%f,%f", &custom.distance, &custom.height, &custom.side,
+                        &custom.lookAhead, &custom.lookHeight, &custom.fovDegrees, &custom.follow) == 7 &&
+            custom.fovDegrees > 10.0f && custom.fovDegrees < 120.0f && custom.follow > 0.0f &&
+            custom.follow <= 1.0f)
+            rig = custom;
+        else
+            std::fprintf(stderr, "[MODCAM-1] ignored REO_MODERN_CAMERA_RIG=%s\n", text);
+    }
     game = addresses;
     originalService = runtime.lookupFunction(game.frameService);
     if (!originalService || originalService == service)
@@ -151,6 +184,9 @@ inline void install(PS2Runtime& runtime, Addresses addresses = File1) {
         // Overlay-aware: replaces the function only while overlay 0 is resident.
         runtime.registerOverlayFunction(game.overlayBase, 0x336f574du, 4u, game.overlayId, game.cameraApply,
                                         cameraApply);
-    std::fprintf(stderr, "[MODCAM-1] installed follow=%d probe=%d\n", int(enabled), int(probe));
+    std::fprintf(stderr,
+                 "[MODCAM-1] installed follow=%d probe=%d rig=%.0f,%.0f,%.0f,%.0f,%.0f,%.1f,%.2f\n",
+                 int(enabled), int(probe), rig.distance, rig.height, rig.side, rig.lookAhead, rig.lookHeight,
+                 rig.fovDegrees, rig.follow);
 }
 } // namespace reo::modern_camera
