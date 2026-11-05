@@ -26,6 +26,9 @@ public sealed partial class Settings {
     public string ResolvedAspect => Array.IndexOf(DisplayOptions.Aspects, AspectRatio) >= 0 ? AspectRatio : "4:3";
     [System.Text.Json.Serialization.JsonIgnore]
     public bool ResolvedWidescreen => WidescreenCamera && ResolvedAspect != "4:3";
+    // Over-the-shoulder camera that follows the local character (File #1). Off keeps
+    // the original fixed room cameras.
+    public bool ModernCamera { get; set; }
     [System.Text.Json.Serialization.JsonIgnore]
     public string ResolvedFit => ScreenFit is "stretch" or "center" or "fill" ? ScreenFit : "fit";
     public bool LinearFilter { get; set; } = true;

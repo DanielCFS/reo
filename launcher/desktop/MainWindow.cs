@@ -56,6 +56,7 @@ public partial class MainWindow : Window {
         ScreenFit.SelectedIndex = Array.IndexOf(DisplayOptions.Fits, settings.ResolvedFit);
         UpdateScreenFitHint();
         Fullscreen.IsChecked = settings.Fullscreen;
+        ModernCamera.IsChecked = settings.ModernCamera;
         PerformanceOverlay.IsChecked = settings.PerformanceOverlay;
         AsyncVif.IsChecked = settings.AsyncVif;
         GpuMovies.IsChecked = settings.GpuMovies;
@@ -187,6 +188,7 @@ public partial class MainWindow : Window {
                 .Fits[Math.Clamp(ScreenFit.SelectedIndex, 0, DisplayOptions.Fits.Length - 1)];
         UpdateScreenFitHint();
         settings.Fullscreen = Fullscreen.IsChecked == true;
+        settings.ModernCamera = ModernCamera.IsChecked == true;
         settings.PerformanceOverlay = PerformanceOverlay.IsChecked == true;
         settings.AsyncVif = AsyncVif.IsChecked == true;
         if (GpuMovies.IsEnabled) // greyed out on an incompatible GPU; keep the saved choice

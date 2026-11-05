@@ -13,6 +13,7 @@
 #endif
 #if defined(REO_GAME_FILE1) || defined(REO_GAME_FILE2)
 #include "overrides/reo_widescreen.h"
+#include "overrides/reo_modern_camera.h"
 #endif
 #if defined(REO_HAVE_GPU_PARENT_NATURAL_HOOKS) && defined(REO_GAME_FILE1)
 #include "natural_dispatch.h"
@@ -1446,6 +1447,7 @@ int main(int argc, char* argv[]) {
         reo::rumble::install(runtime);
         reo::audio::install(runtime);
         reo::widescreen::install(runtime);
+        reo::modern_camera::install(runtime);
         reo::subtitles::install(runtime);
     }
 #endif

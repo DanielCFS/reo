@@ -14,7 +14,7 @@ internal static class GraphicsOptionsTests {
                     InternalResolution = 4, AspectRatio = "16:9", ScreenFit = "fill",
                     LinearFilter = false, TextureLinear = true, Anisotropy = 16,
                     AntiAliasingMode = "smaa", Brightness = 125, Gamma = 1.25,
-                    AsyncVif = false, GpuMovies = false, PerformanceOverlay = true
+                    AsyncVif = false, GpuMovies = false, PerformanceOverlay = true, ModernCamera = true
                 };
                 // Exercise the saved-settings boundary too, including Croatian decimal formatting.
                 settings = JsonSerializer.Deserialize<Settings>(JsonSerializer.Serialize(settings))!;
@@ -26,7 +26,8 @@ internal static class GraphicsOptionsTests {
                     ["REO_TEXTURE_FILTER"] = "linear", ["REO_INTERNAL_RESOLUTION"] = "4",
                     ["REO_PERFORMANCE_OVERLAY"] = "1", ["REO_GPU_MEMORY_LOG"] = "1",
                     ["REO_TEXTURE_ANISOTROPY"] = "16", ["REO_POST_AA"] = "smaa",
-                    ["REO_BRIGHTNESS"] = "1.25", ["REO_GAMMA"] = "1.25"
+                    ["REO_BRIGHTNESS"] = "1.25", ["REO_GAMMA"] = "1.25",
+                    ["REO_MODERN_CAMERA"] = "1"
                 };
                 check(expected.All(p => launch.Environment.GetValueOrDefault(p.Key) == p.Value),
                       game + " saved graphics settings reach the renderer contract");
