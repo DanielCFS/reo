@@ -285,7 +285,7 @@
                         <ColumnDefinition Width="Auto" />
                       </Grid.ColumnDefinitions>
                       <compat:Rc1TextBlock Text="Fast loading" FontSize="14" VerticalAlignment="Center" />
-                      <CheckBox x:Name="FastLoading" IsCheckedChanged="SaveSettings" Grid.Column="1" AutomationProperties.Name="Fast loading" Classes="ToggleSwitch" ToolTip.Tip="Speeds up the game's loading screens by running them faster than real time. Gameplay, menus and movies are unchanged. File #1 only. Applies on the next launch." />
+                      <CheckBox x:Name="FastLoading" IsCheckedChanged="SaveSettings" Grid.Column="1" AutomationProperties.Name="Fast loading" Classes="ToggleSwitch" ToolTip.Tip="Speeds up the game's loading screens by running them faster than real time. Gameplay, menus and movies are unchanged. Offline File #1 only; online sessions keep normal loading. Applies on the next launch." />
                     </Grid>
                     <DockPanel MinHeight="48">
                       <ComboBox x:Name="WindowSize" SelectionChanged="SettingChanged" DockPanel.Dock="Right" AutomationProperties.Name="Window resolution" Classes="GraphicsChoice" ToolTip.Tip="Windowed output size. Borderless fullscreen uses the desktop resolution.">
