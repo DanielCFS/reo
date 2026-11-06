@@ -150,11 +150,25 @@ inline bool aiming(const uint8_t* ram) {
     const uint32_t actor = localActor(ram);
     return ram[actor + 8u] == 2u && ram[actor + 9u] == 1u;
 }
+// The player controls the character: standing, walking or running (state 1,
+// sub-states 0-8) or with the weapon readied (state 2). Other sub-states are
+// actions the game animates itself (23 = opening a door, lockers, pickups,
+// damage); turning the character then drags it out of the animation.
+inline bool controllable(const uint8_t* ram, uint32_t actor) {
+    const uint8_t state = ram[actor + 8u], sub = ram[actor + 9u];
+    return state == 2u || (state == 1u && sub <= 8u);
+}
+// An action that lasts longer than this (hiding in a locker) hands the view
+// back to the game's own camera until the player controls the character again.
+inline constexpr float kHandoverSeconds = 1.5f;
+inline float actionSeconds = 0.0f;
+inline bool handedOver = false;
+inline float gameFov = 0.0f; // the game's FOV value before the modern camera's
 
 // Free aim (REO_MODERN_CAMERA_FREE_AIM, default on with the modern camera).
 // File #1 player actors keep their aim target at +0xCDC (spawn index, 0xFF none;
 // spawn record 0x74F250 + i*96, byte +1 = enemy slot) and the vertical aim at
-// +0xBC8 (int16, +-0x2000, down positive). The original search o2 0x65ED70 takes
+// +0xBC8 (int16, +-0x2000, up positive). The original search o2 0x65ED70 takes
 // the nearest valid enemy in any direction (per-character cone 0x71B960 = 360
 // degrees) from the local player's distance-sorted list 0x3B2E10 + slot*50 with
 // per-enemy {distance, angle, blocked} records at 0x3B41C0 + slot*400. The modern
@@ -497,6 +511,17 @@ inline bool follow(uint8_t* ram) {
     const float x = f32(ram, actor + 0x38u), y = f32(ram, actor + 0x3cu), z = f32(ram, actor + 0x40u);
     if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
         return false;
+    static const bool stateLog = std::getenv("REO_MODERN_CAMERA_STATE_LOG") != nullptr;
+    if (stateLog) {
+        static uint32_t last = 0xffffffffu;
+        const uint32_t now = ram[actor + 8u] | ram[actor + 9u] << 8 | ram[actor + 10u] << 16 | ram[actor + 11u] << 24;
+        if (now != last) {
+            last = now;
+            std::fprintf(stderr, "[MODCAM-STATE] state=%u/%u/%u/%u anim=%u free=%d move=%.2f,%.2f xyz=%.0f,%.0f\n",
+                         ram[actor + 8u], ram[actor + 9u], ram[actor + 10u], ram[actor + 11u],
+                         u16(ram, actor + 0x1f2u), int(freeGameplay(ram)), moveX.load(), moveY.load(), x, z);
+        }
+    }
     constexpr float tau = 6.28318530718f, degree = 0.01745329252f;
     const float heading = float(int16_t(u16(ram, actor + 0x92u))) * tau / 65536.0f;
     const uint16_t room = u16(ram, game.room);
@@ -508,6 +533,40 @@ inline bool follow(uint8_t* ram) {
     const float sx = stickX.load(std::memory_order_relaxed), sy = stickY.load(std::memory_order_relaxed);
     const int mx = mouseDx.exchange(0, std::memory_order_relaxed);
     const int my = mouseDy.exchange(0, std::memory_order_relaxed);
+    if (!haveYaw || room != yawRoom)
+        gameFov = f32(ram, game.fov); // still the room's own value
+    // Long actions (lockers): leave the game's camera and FOV alone; come back
+    // behind the character once it is controllable again.
+    static const float handoverTest = [] {
+        const char* value = std::getenv("REO_MODERN_CAMERA_HANDOVER_TEST");
+        return value ? float(std::atof(value)) : 0.0f;
+    }();
+    static const auto firstFollow = now;
+    const bool forced = handoverTest > 0.0f && std::chrono::duration<float>(now - firstFollow).count() > handoverTest;
+    // Doors (23 open, 95 room change) keep the modern view up to the transition.
+    const uint8_t sub = ram[actor + 9u];
+    const bool door = ram[actor + 8u] == 1u && (sub == 23u || sub == 95u);
+    actionSeconds = controllable(ram, actor) || door ? 0.0f : actionSeconds + dt;
+    if (forced || actionSeconds > kHandoverSeconds) {
+        if (!handedOver) {
+            handedOver = true;
+            if (std::isfinite(gameFov) && gameFov > 0.0f)
+                wf32(ram, game.fov, gameFov);
+            reo::overlay::crosshair.store(0u, std::memory_order_relaxed);
+            aimRay.valid = false;
+            if (stateLog)
+                std::fprintf(stderr, "[MODCAM-STATE] handover to game camera\n");
+        }
+        return false;
+    }
+    if (handedOver) {
+        handedOver = false;
+        haveYaw = false;
+        aimBlend = 0.0f;
+        cameraClearance = 1.0f;
+        if (stateLog)
+            std::fprintf(stderr, "[MODCAM-STATE] modern camera resumes\n");
+    }
     if (!haveYaw || room != yawRoom) {
         // Entering a room: start behind the character at the resting pitch.
         yaw = heading;
@@ -550,10 +609,11 @@ inline bool follow(uint8_t* ram) {
     view.side = mix(rig.side, aimRig.side);
     view.lookAhead = mix(rig.lookAhead, aimRig.lookAhead);
     view.fovDegrees = mix(rig.fovDegrees, aimRig.fovDegrees);
-    if (aim) {
+    const bool control = controllable(ram, actor);
+    if (aim && control) {
         const int16_t facing = int16_t(std::lround(yaw * 65536.0f / tau));
         std::memcpy(ram + actor + 0x92u, &facing, 2);
-    } else if (freeGameplay(ram) && ram[actor + 8u] == 1u) {
+    } else if (freeGameplay(ram) && control && ram[actor + 8u] == 1u) {
         // Moving: face camera + stick direction (stick up = camera forward,
         // stick right = lower yaw), turning at a bounded rate.
         const float mx = moveX.load(std::memory_order_relaxed), my = moveY.load(std::memory_order_relaxed);
@@ -613,13 +673,13 @@ inline bool follow(uint8_t* ram) {
     wf32(ram, game.eye + 0x14u, ez + dz * reach);
     applyFov(ram, view.fovDegrees);
     aimRay = {true, {ex, ey, ez}, {dx, dy, dz}};
-    if (freeAimEnabled() && aiming(ram)) {
+    if (freeAimEnabled() && aiming(ram) && control) {
         // Face and aim at the target, or at the point the crosshair covers.
         const uint32_t target = maintainTarget(ram, actor);
         float point[3] = {ex + dx * 1200.0f, ey + dy * 1200.0f, ez + dz * 1200.0f};
         if (target)
             enemyPoint(ram, target, point);
-        const float gx = point[0] - x, gz = point[2] - z, gy = (y + 130.0f) - point[1];
+        const float gx = point[0] - x, gz = point[2] - z, gy = point[1] - (y + 130.0f);
         const float horizontal = std::sqrt(gx * gx + gz * gz);
         if (horizontal > 30.0f) {
             const int16_t facing = int16_t(std::lround(std::atan2(gx, gz) * 65536.0f / tau));
