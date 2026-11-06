@@ -112,7 +112,9 @@ inline void worker() {
     }
 }
 
-// During the game's own loading states (0x4BADD0: 1 room load, 14 scenario setup)
+// During the game's own loading states (0x4BADD0: 1 room load, 3 door transition,
+// 14 scenario setup, and gameplay while a door transition is requested,
+// 0x4BAE07 == 1)
 // the loader polls each read's completion once per frame, so an asynchronous
 // read costs at least one frame even when the host read takes microseconds.
 // There, reads complete synchronously (the original HLE path): a brief host stall
@@ -127,7 +129,7 @@ inline bool loadingState(const uint8_t* memory) {
     if (!on)
         return false;
     const uint8_t state = memory[0x4badd0u];
-    return state == 1u || state == 14u;
+    return state == 1u || state == 3u || state == 14u || (state == 2u && memory[0x4bae07u] == 1u);
 }
 
 // Bound at 0x1179E8 (SifCallRpc). Delegates everything except File #1's sceCdRead.

@@ -2306,7 +2306,8 @@ bool pad2TestInteractQuit(uint8_t* rd, double now, reo::DualShock2State& pad, ui
 }
 
 // Fast loading (REO_FAST_LOADING=1): while the game sits in its loading states
-// (0x4BADD0: 1 room load, 14 scenario setup) the emulated vblank runs 8x faster,
+// (0x4BADD0: 1 room load, 3 door transition, 14 scenario setup, and the door
+// exit while 0x4BAE07 == 1; 3 there follows cutscenes) the emulated vblank runs 8x faster,
 // so the loader's per-frame texture uploads and fades finish sooner. Gameplay,
 // menus, movies and cutscenes always run at normal speed. The runtime reads the
 // factor (patch 0120).
@@ -2323,7 +2324,8 @@ void reoFastLoading(const uint8_t* ram) {
     if (!enabled || !ram)
         return;
     const uint8_t state = ram[0x4badd0u];
-    g_reoVblankTurbo.store(state == 1u || state == 14u ? factor : 1, std::memory_order_relaxed);
+    const bool loading = state == 1u || state == 3u || state == 14u || (state == 2u && ram[0x4bae07u] == 1u);
+    g_reoVblankTurbo.store(loading ? factor : 1, std::memory_order_relaxed);
 }
 
 // Room transition timing (modern camera sessions): one line whenever the game
@@ -2349,13 +2351,20 @@ void modernCameraTransitionLog(const uint8_t* ram, double now) {
     static double lastTime = 0;
     if (!(current != last))
         return;
+    float playerX = 0.0f, playerZ = 0.0f;
+    if (ram[0x4baded] < 4u) {
+        const uint32_t actor = 0x4a5c30u + uint32_t(ram[0x4baded]) * 0x10e0u;
+        std::memcpy(&playerX, ram + actor + 0x38u, 4);
+        std::memcpy(&playerZ, ram + actor + 0x40u, 4);
+    }
     const uint64_t sectors = reo::load_stats::sectors.load(std::memory_order_relaxed);
     const uint64_t ns = reo::load_stats::nanoseconds.load(std::memory_order_relaxed);
     std::fprintf(stderr,
                  "[ROOM-TRANSITION] t=%.3f +%.3fs state=%u.%u room=%u request=%u destination=%u screen=%u "
-                 "disc=+%llu sectors/%.0f ms\n",
+                 "xz=%.0f,%.0f disc=+%llu sectors/%.0f ms\n",
                  now, now - lastTime, current.state, current.substate, current.room, current.request, current.destination,
-                 current.screen, (unsigned long long)(sectors - lastSectors), double(ns - lastNs) / 1e6);
+                 current.screen, playerX, playerZ, (unsigned long long)(sectors - lastSectors),
+                 double(ns - lastNs) / 1e6);
     last = current;
     lastSectors = sectors;
     lastNs = ns;
