@@ -1,5 +1,6 @@
 #pragma once
 #include "ps2_runtime.h"
+#include "ps2_runtime_macros.h"
 #include "runtime/input/input.h"
 #include "runtime/gs/performance.h"
 #include <atomic>
@@ -31,6 +32,7 @@
 // once per second during gameplay (investigation aid, no RAM writes).
 
 void o0_00375920_0x375920(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime);
+void o2_00617000_0x617000(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime);
 
 namespace reo::modern_camera {
 struct Addresses {
@@ -81,6 +83,7 @@ inline constexpr float kAimUpPitch = -10.0f, kAimDownPitch = 12.0f;
 // itself keeps a run's direction while the input stays the same.
 inline constexpr float kTurnDegPerSec = 720.0f;
 inline float aimBlend = 0.0f; // 0 = normal rig, 1 = aim rig
+inline float cameraClearance = 1.0f; // 1 = full distance, 0 = pulled in by a wall
 
 // Orbit input. REO_MODERN_CAMERA_CONTROLS overrides
 // "stickYawDegPerSec,stickPitchDegPerSec,mouseDegPerPixel,invertY".
@@ -228,11 +231,11 @@ inline void probeFrame(const uint8_t* ram) {
     const uint32_t actor = game.actors + ram[game.localSlot] * game.actorStride;
     std::fprintf(stderr,
                  "[MODCAM-PROBE] f=%u room=%u slot=%u xyz=%.1f,%.1f,%.1f yaw=%d cam=%.1f/%.1f "
-                 "guards=%02x,%02x,%02x,%02x,%02x free=%d state=%u/%u\n",
+                 "guards=%02x,%02x,%02x,%02x,%02x free=%d state=%u/%u clear=%.2f\n",
                  frame, u16(ram, game.room), ram[game.localSlot], f32(ram, actor + 0x38u), f32(ram, actor + 0x3cu),
                  f32(ram, actor + 0x40u), int(int16_t(u16(ram, actor + 0x92u))), yaw * 57.2957795f,
                  pitch * 57.2957795f, ram[0x4badeeu], ram[0x755ec4u], ram[0x4badf8u], ram[0x4bae8du],
-                 ram[0x4bae07u], int(freeGameplay(ram)), ram[actor + 8u], ram[actor + 9u]);
+                 ram[0x4bae07u], int(freeGameplay(ram)), ram[actor + 8u], ram[actor + 9u], cameraClearance);
     for (uint32_t row = 0; row < 0x80u; row += 0x10u) {
         const uint32_t a = game.cameraBlock + row;
         std::fprintf(stderr, "[MODCAM-PROBE]   %06x: %12.3f %12.3f %12.3f %12.3f\n", a, f32(ram, a),
@@ -277,7 +280,57 @@ inline float restingPitch() {
     return std::atan2(rig.height - rig.lookHeight, rig.distance + rig.lookAhead);
 }
 
-inline bool follow(uint8_t* ram) {
+// Wall collision (stage 3) uses the game's own floor query (gameplay overlay,
+// 0x570000 id 3, function 0x617000): a0 = position (x, y, z), the byte at a3
+// stays 0xFF when no floor polygon is found, f0 returns the floor height. It is
+// called on the guest thread with the guest context saved and restored, and its
+// buffers placed in free stack space below the guest stack pointer.
+inline bool collisionEnabled() {
+    static const bool on = [] {
+        const char* value = std::getenv("REO_MODERN_CAMERA_COLLISION");
+        return !(value && std::strcmp(value, "0") == 0);
+    }();
+    return on;
+}
+
+inline bool floorQueryResident(const uint8_t* ram) {
+    uint32_t magic = 0, id = 0;
+    std::memcpy(&magic, ram + 0x570000u, 4);
+    std::memcpy(&id, ram + 0x570004u, 4);
+    return magic == 0x336f574du && id == 3u;
+}
+
+inline bool walkable(uint8_t* ram, R5900Context* ctx, PS2Runtime* runtime, float x, float y, float z) {
+    uint8_t* const rdram = ram; // the register macros refer to rdram
+    (void)rdram;
+    alignas(16) R5900Context saved;
+    std::memcpy(&saved, ctx, sizeof(saved));
+    const uint32_t base = (GPR_U32(ctx, 29) - 0x600u) & ~0xfu;
+    const uint32_t query = base + 0x400u, normal = base + 0x420u, scratch = base + 0x440u, flags = base + 0x4c0u;
+    const float position[4] = {x, y, z, 1.0f};
+    std::memcpy(ram + query, position, sizeof(position));
+    std::memset(ram + normal, 0, 0x20);
+    std::memset(ram + flags, 0, 8);
+    SET_GPR_U32(ctx, 29, base);
+    SET_GPR_U32(ctx, 4, query);       // a0 position
+    SET_GPR_U32(ctx, 5, normal);      // a1 surface normal out
+    SET_GPR_U32(ctx, 6, scratch);     // a2 work
+    SET_GPR_U32(ctx, 7, flags);       // a3 surface id out (0xFF = none)
+    SET_GPR_U32(ctx, 8, 0xffu);       // t0 all surfaces, as the game's callers pass
+    SET_GPR_U32(ctx, 9, flags + 1u);  // t1
+    SET_GPR_U32(ctx, 10, flags + 2u); // t2 (half)
+    SET_GPR_U32(ctx, 11, 0u);         // t3 no callback
+    SET_GPR_U32(ctx, 31, game.cameraApply);
+    ctx->pc = 0x617000u;
+    o2_00617000_0x617000(ram, ctx, runtime);
+    float height = 0.0f;
+    std::memcpy(&height, &ctx->f[0], 4);
+    const uint8_t surface = ram[flags];
+    std::memcpy(ctx, &saved, sizeof(saved));
+    return surface != 0xffu && std::isfinite(height) && std::fabs(height - (y - 40.0f)) < 70.0f;
+}
+
+inline bool follow(uint8_t* ram, R5900Context* ctx = nullptr, PS2Runtime* runtime = nullptr) {
     if (ram[game.gameState] != 2u || ram[game.localSlot] >= 4u)
         return false;
     const uint32_t actor = game.actors + ram[game.localSlot] * game.actorStride;
@@ -359,10 +412,31 @@ inline bool follow(uint8_t* ram) {
     // Orbit around the shoulder point; at the resting pitch this matches the rig.
     const float cp = std::cos(pitch), sp = std::sin(pitch);
     const float dx = fx * cp, dy = -sp, dz = fz * cp;
-    const float px = x + rx * view.side, py = y + view.height, pz = z + rz * view.side;
-    const float ex = px - dx * view.distance, ey = py - dy * view.distance - std::sin(restingPitch()) * view.distance,
-                ez = pz - dz * view.distance;
-    const float reach = view.distance + view.lookAhead;
+    // Wall collision: walk from the character toward the desired eye over the
+    // game's floor; where the floor ends or steps away, pull the camera in front
+    // of it (immediately), and ease back out when the way is clear again.
+    float& clearance = cameraClearance;
+    float clear = 1.0f;
+    if (ctx && runtime && collisionEnabled() && freeGameplay(ram) && floorQueryResident(ram)) {
+        const float sx0 = x + rx * view.side - dx * view.distance - x, sz0 = z + rz * view.side - dz * view.distance - z;
+        const float length = std::sqrt(sx0 * sx0 + sz0 * sz0);
+        const int steps = std::max(1, std::min(12, int(std::ceil(length / 20.0f))));
+        for (int i = 1; i <= steps; ++i) {
+            const float t = float(i) / float(steps);
+            if (!walkable(ram, ctx, runtime, x + sx0 * t, y + 40.0f, z + sz0 * t)) {
+                clear = std::max(0.0f, float(i - 1) / float(steps) - 0.12f);
+                break;
+            }
+        }
+    }
+    clearance = clear < clearance ? clear : std::fmin(clear, clearance + dt * 1.5f);
+    // Closest view: just behind the shoulder; the look direction is unchanged.
+    const float closest = 22.0f, distance = closest + (view.distance - closest) * clearance;
+    const float side = view.side * (0.55f + 0.45f * clearance);
+    const float px = x + rx * side, py = y + view.height, pz = z + rz * side;
+    const float ex = px - dx * distance, ey = py - dy * distance - std::sin(restingPitch()) * distance,
+                ez = pz - dz * distance;
+    const float reach = distance + view.lookAhead;
     wf32(ram, game.eye + 0x0u, ex);
     wf32(ram, game.eye + 0x4u, ey);
     wf32(ram, game.eye + 0x8u, ez);
@@ -381,7 +455,7 @@ inline bool follow(uint8_t* ram) {
 
 inline void cameraApply(uint8_t* ram, R5900Context* ctx, PS2Runtime* runtime) {
     if (ctx->pc == game.cameraApply && enabled)
-        follow(ram);
+        follow(ram, ctx, runtime);
     o0_00375920_0x375920(ram, ctx, runtime);
 }
 
