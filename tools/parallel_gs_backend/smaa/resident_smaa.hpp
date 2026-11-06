@@ -20,6 +20,7 @@ class ResidentSmaa {
     struct Extent {
         uint32_t sourceWidth, sourceHeight, width, height, flags;
         uint32_t fps = 0, frameMs = 0, ups = 0;
+        uint32_t crosshair = 0; // must match the presenter's Parameters push block
     };
 
     Vulkan::Program* load(const char* name, const std::vector<uint32_t>& vertex,

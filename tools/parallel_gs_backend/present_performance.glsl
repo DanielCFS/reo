@@ -34,12 +34,12 @@ vec4 crosshairOverlay(vec4 color, vec2 centre, float scale, uint value) {
     float spread = float((value >> 8) & 255u) / 255.0;
     vec2 d = (gl_FragCoord.xy - centre) / max(scale, 1.0);
     vec2 a = abs(d);
-    float gap = 7.0 + spread * 18.0, len = 9.0, half_ = 1.0, edge = 1.0;
+    float gap = 3.0 + spread * 10.0, len = 5.0, half_ = 0.5, edge = 0.7;
     bool tick = (a.y <= half_ && a.x >= gap && a.x <= gap + len) || (a.x <= half_ && a.y >= gap && a.y <= gap + len);
-    bool dot = length(d) <= 1.5;
+    bool dot = length(d) <= 0.8;
     if (tick || dot) return vec4(mix(color.rgb, vec3(1.0), 0.92), color.a);
     bool outline = (a.y <= half_ + edge && a.x >= gap - edge && a.x <= gap + len + edge) ||
-                   (a.x <= half_ + edge && a.y >= gap - edge && a.y <= gap + len + edge) || length(d) <= 1.5 + edge;
+                   (a.x <= half_ + edge && a.y >= gap - edge && a.y <= gap + len + edge) || length(d) <= 0.8 + edge;
     return outline ? vec4(color.rgb * 0.3, color.a) : color;
 }
 vec4 performanceOverlay(vec4 color, uvec2 destination, uint fps, uint frameMs, uint ups) {

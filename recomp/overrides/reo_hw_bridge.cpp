@@ -2322,24 +2322,32 @@ struct CameraSubclass {
 };
 CameraSubclass g_cameraChild, g_cameraTop;
 
+// While the modern camera owns the cursor, the runtime's own borderless-fullscreen
+// cursor handling (Win32ModalRender: updateCursor after WM_MOUSEMOVE and others,
+// arrow restored on WM_MOUSELEAVE, which fires whenever the cursor crosses into
+// the presentation child) would fight it and make the cursor flicker. Swallow
+// WM_MOUSELEAVE and re-assert this cursor after the messages it reacts to.
 LRESULT CALLBACK modernCameraWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     const WNDPROC previous = hwnd == g_cameraChild.hwnd ? g_cameraChild.previous : g_cameraTop.previous;
+    const int mode = g_cameraCursorMode.load();
+    if (mode == CursorUntouched)
+        return CallWindowProcW(previous, hwnd, message, wParam, lParam);
+    auto apply = [mode] { SetCursor(mode == CursorHidden ? nullptr : LoadCursorW(nullptr, MAKEINTRESOURCEW(32512))); };
     if (message == WM_SETCURSOR && LOWORD(lParam) == HTCLIENT) {
-        const int mode = g_cameraCursorMode.load();
-        if (mode == CursorHidden) {
-            SetCursor(nullptr);
-            return TRUE;
-        }
-        if (mode == CursorArrow) {
-            SetCursor(LoadCursorW(nullptr, MAKEINTRESOURCEW(32512)));
-            return TRUE;
-        }
+        apply();
+        return TRUE;
     }
-    if (message == WM_MOUSEWHEEL && g_cameraCursorMode.load() != CursorUntouched) {
+    if (message == WM_MOUSELEAVE)
+        return 0;
+    if (message == WM_MOUSEWHEEL) {
         g_cameraWheel.fetch_add(GET_WHEEL_DELTA_WPARAM(wParam));
         return 0;
     }
-    return CallWindowProcW(previous, hwnd, message, wParam, lParam);
+    const LRESULT result = CallWindowProcW(previous, hwnd, message, wParam, lParam);
+    if (message == WM_MOUSEMOVE || message == WM_WINDOWPOSCHANGED || message == WM_STYLECHANGED ||
+        message == WM_SIZE || message == WM_SETFOCUS || message == WM_ACTIVATEAPP)
+        apply();
+    return result;
 }
 
 void modernCameraSubclass(CameraSubclass& slot, HWND hwnd) {

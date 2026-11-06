@@ -154,6 +154,13 @@ inline void filterPad(const uint8_t* ram, reo::DualShock2State& pad, uint16_t& p
     if (!active())
         return;
     const bool free = freeGameplay(ram);
+    static const bool logFree = std::getenv("REO_MODERN_CAMERA_MENU_LOG") != nullptr;
+    static int lastFree = -1;
+    if (logFree && int(free) != lastFree && ram) {
+        lastFree = int(free);
+        std::fprintf(stderr, "[MODCAM-FREE] free=%d gs=%u guards=%02x,%02x,%02x,%02x\n", int(free),
+                     ram[game.gameState], ram[0x4badeeu], ram[0x755ec4u], ram[0x4badf8u], ram[0x4bae8du]);
+    }
     aimHeld.store(free && (pressed & reo::PS2_R1), std::memory_order_relaxed);
     float mx = 0.0f, my = 0.0f;
     if (free) {

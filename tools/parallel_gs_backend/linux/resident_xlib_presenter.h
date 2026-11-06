@@ -2,6 +2,7 @@
 #include "device.hpp"
 #include "command_buffer.hpp"
 #include "smaa/resident_smaa.hpp"
+#include "../../../runtime/gs/performance.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -37,6 +38,7 @@ class ResidentXlibPresenter {
         // Match the shared final-pass shader ABI. The Windows launcher supplies
         // overlay readings; this reference presenter keeps the overlay off.
         uint32_t fps = 0, frameMs = 0, ups = 0;
+        uint32_t crosshair = 0;
     };
     static uint32_t layoutFlags() {
         const char* aspect = std::getenv("REO_DISPLAY_ASPECT");
@@ -318,6 +320,7 @@ class ResidentXlibPresenter {
                                (colorPercent("REO_GAMMA", 0.5f, 2.0f) << 16u);
         const Parameters parameters{description.width, description.height, width_, height_,
                                     (linear ? 1u : 0u) | (fxaa ? 2u : 0u) | color | layoutFlags()};
+        parameters.crosshair = reo::overlay::crosshair.load(std::memory_order_relaxed);
         command->push_constants(&parameters, 0, sizeof(parameters));
         command->draw(3);
         command->end_render_pass();
