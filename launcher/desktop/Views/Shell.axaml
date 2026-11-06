@@ -277,7 +277,7 @@
                         <ColumnDefinition Width="Auto" />
                       </Grid.ColumnDefinitions>
                       <compat:Rc1TextBlock Text="Modern camera (over the shoulder)" FontSize="14" VerticalAlignment="Center" />
-                      <CheckBox x:Name="ModernCamera" IsCheckedChanged="SaveSettings" Grid.Column="1" AutomationProperties.Name="Modern camera" Classes="ToggleSwitch" ToolTip.Tip="Experimental. A camera behind the character replaces the fixed room cameras. File #1 only. Applies on the next launch." />
+                      <CheckBox x:Name="ModernCamera" IsCheckedChanged="SaveSettings" Grid.Column="1" AutomationProperties.Name="Modern camera" Classes="ToggleSwitch" ToolTip.Tip="Experimental. A camera behind the character replaces the fixed room cameras. Right stick, arrow keys or mouse turn it; hold L2 to use the right stick for ad-libs. File #1 only. Applies on the next launch." />
                     </Grid>
                     <DockPanel MinHeight="48">
                       <ComboBox x:Name="WindowSize" SelectionChanged="SettingChanged" DockPanel.Dock="Right" AutomationProperties.Name="Window resolution" Classes="GraphicsChoice" ToolTip.Tip="Windowed output size. Borderless fullscreen uses the desktop resolution.">

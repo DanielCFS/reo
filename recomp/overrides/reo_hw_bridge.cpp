@@ -73,6 +73,7 @@
 #include <windows.h>
 #include <xinput.h>
 #endif
+#include "reo_modern_camera.h"
 
 void reoPad2Stop();
 
@@ -2302,6 +2303,81 @@ bool pad2TestInteractQuit(uint8_t* rd, double now, reo::DualShock2State& pad, ui
     return true;
 }
 
+// Modern camera mouse look. During free gameplay with the game focused, the
+// cursor is hidden, confined to the game window and re-centred every feeder tick;
+// its movement turns the camera. Menus, cutscenes and other windows release it.
+#ifdef _WIN32
+namespace {
+std::atomic<bool> g_cameraCursorHidden{false};
+WNDPROC g_cameraPreviousProc = nullptr;
+HWND g_cameraSubclassed = nullptr;
+
+LRESULT CALLBACK modernCameraCursorProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    if (message == WM_SETCURSOR && LOWORD(lParam) == HTCLIENT && g_cameraCursorHidden.load()) {
+        SetCursor(nullptr);
+        return TRUE;
+    }
+    return CallWindowProcW(g_cameraPreviousProc, hwnd, message, wParam, lParam);
+}
+} // namespace
+
+void modernCameraMouse(const uint8_t* ram) {
+    static const bool enabled = [] {
+        const char* value = std::getenv("REO_MODERN_CAMERA_MOUSE");
+        return reo::modern_camera::active() && !(value && std::strcmp(value, "0") == 0);
+    }();
+    if (!enabled)
+        return;
+    HWND top = GetForegroundWindow();
+    DWORD pid = 0;
+    if (top)
+        GetWindowThreadProcessId(top, &pid);
+    const bool capture = top && pid == GetCurrentProcessId() && !IsIconic(top) &&
+                         reo::modern_camera::freeGameplay(ram);
+    if (!capture) {
+        if (g_cameraCursorHidden.exchange(false))
+            ClipCursor(nullptr);
+        return;
+    }
+    RECT client{};
+    if (!GetClientRect(top, &client) || client.right <= client.left || client.bottom <= client.top)
+        return;
+    POINT centre{(client.left + client.right) / 2, (client.top + client.bottom) / 2};
+    POINT topLeft{client.left, client.top}, bottomRight{client.right, client.bottom};
+    ClientToScreen(top, &centre);
+    ClientToScreen(top, &topLeft);
+    ClientToScreen(top, &bottomRight);
+    // The presentation child under the centre receives WM_SETCURSOR first.
+    HWND child = WindowFromPoint(centre);
+    DWORD childPid = 0;
+    if (child)
+        GetWindowThreadProcessId(child, &childPid);
+    if (child && childPid == GetCurrentProcessId() && child != g_cameraSubclassed && !g_cameraSubclassed) {
+        g_cameraPreviousProc = reinterpret_cast<WNDPROC>(
+            SetWindowLongPtrW(child, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(modernCameraCursorProc)));
+        if (g_cameraPreviousProc)
+            g_cameraSubclassed = child;
+    }
+    if (!g_cameraCursorHidden.exchange(true)) {
+        // Start of capture: no delta, just centre the cursor.
+        RECT clip{topLeft.x, topLeft.y, bottomRight.x, bottomRight.y};
+        ClipCursor(&clip);
+        SetCursorPos(centre.x, centre.y);
+        return;
+    }
+    POINT cursor{};
+    if (!GetCursorPos(&cursor))
+        return;
+    const int dx = cursor.x - centre.x, dy = cursor.y - centre.y;
+    if (dx || dy) {
+        reo::modern_camera::addMouse(dx, dy);
+        SetCursorPos(centre.x, centre.y);
+    }
+}
+#else
+void modernCameraMouse(const uint8_t*) {}
+#endif
+
 void pad2FeederLoop() {
     try {
         uint32_t frame = 0;
@@ -2360,6 +2436,9 @@ void pad2FeederLoop() {
                 else
                     pressed |= pad2TestWorldTarget(routeRam, now, hostPad);
             }
+            // Modern camera: right stick orbits the camera (L2 keeps the original ad-lib).
+            reo::modern_camera::filterPad(routeRam, hostPad);
+            modernCameraMouse(routeRam);
             g_pad2.lastPressed = pressed;
             const uint16_t data = (uint16_t)~pressed; // active-low
             // Keep digital directions independent from the analog sticks. Both
