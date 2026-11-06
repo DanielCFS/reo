@@ -2447,14 +2447,166 @@ void modernCameraMouse(const uint8_t* ram) {
     }
 }
 
-// PC controls in the style of modern remakes, with the game focused. Free
-// gameplay: right mouse button aims (R1), left mouse button fires/interacts
-// (Cross) and Shift runs; running is resolved through the game's own
-// control-type table, so it follows the selected controller type. Menus: left
-// button confirms (Cross), right button goes back (Circle), the wheel steps
-// up/down with short presses the game registers one by one. A click that only
-// focuses the window is ignored.
-uint16_t modernCameraKeys(const uint8_t* ram) {
+// Map a screen point to File #1 game image coordinates (640x448), following the
+// presenter's picture placement (present_layout.glsl) for the selected aspect/fit.
+bool modernCameraGamePoint(POINT screen, float& gx, float& gy) {
+    HWND surface = g_cameraChild.hwnd ? g_cameraChild.hwnd : g_cameraTop.hwnd;
+    RECT client{};
+    if (!surface || !GetClientRect(surface, &client) || !ScreenToClient(surface, &screen))
+        return false;
+    const float width = float(client.right - client.left), height = float(client.bottom - client.top);
+    if (width < 2.0f || height < 2.0f)
+        return false;
+    static const float aspect = [] {
+        const char* value = std::getenv("REO_DISPLAY_ASPECT");
+        return !value                              ? 4.0f / 3.0f
+               : std::strcmp(value, "16:9") == 0 ? 16.0f / 9.0f
+               : std::strcmp(value, "21:9") == 0 ? 43.0f / 18.0f
+               : std::strcmp(value, "32:9") == 0 ? 32.0f / 9.0f
+                                                 : 4.0f / 3.0f;
+    }();
+    static const int fit = [] {
+        const char* value = std::getenv("REO_DISPLAY_FIT");
+        return !value ? 0 : std::strcmp(value, "stretch") == 0 ? 1 : std::strcmp(value, "fill") == 0 ? 3 : 0;
+    }();
+    float pictureW = width, pictureH = height;
+    if (fit == 0) {
+        pictureH = std::min(width / aspect, height);
+        pictureW = pictureH * aspect;
+    } else if (fit == 3) {
+        pictureH = std::max(width / aspect, height);
+        pictureW = pictureH * aspect;
+    }
+    gx = (float(screen.x) - (width - pictureW) * 0.5f) / pictureW * 640.0f;
+    gy = (float(screen.y) - (height - pictureH) * 0.5f) / pictureH * 448.0f;
+    return gx >= 0.0f && gy >= 0.0f && gx < 640.0f && gy < 448.0f;
+}
+
+// File #1 inventory (ITEM tab). The UI cursor at 0x755E64 points into 0xB8-byte
+// entries from 0x755EF0: entry = panel * 12 + slot (slot 0 TL, 1 TR, 2 BL, 3 BR),
+// panel 0 is the local character on the right, partners follow on the left in
+// order; entry 49 is the local character's equipped weapon. Slot centres are in
+// game image coordinates (52 px cells).
+bool modernCameraInventoryCentre(int entry, float& x, float& y) {
+    if (entry == 49) {
+        x = 590.0f;
+        y = 236.0f;
+        return true;
+    }
+    const int panel = entry / 12, slot = entry % 12;
+    if (entry < 0 || panel > 3 || slot > 3)
+        return false;
+    x = (panel == 0 ? 534.0f : 54.0f + float(panel - 1) * 121.0f) + float(slot & 1) * 52.0f;
+    y = 119.0f + float(slot >> 1) * 52.0f;
+    return true;
+}
+
+int modernCameraInventoryEntryAt(float gx, float gy) {
+    static const int entries[] = {0, 1, 2, 3, 49, 12, 13, 14, 15, 24, 25, 26, 27, 36, 37, 38, 39};
+    for (int entry : entries) {
+        float x = 0, y = 0;
+        if (modernCameraInventoryCentre(entry, x, y) && std::fabs(gx - x) <= 26.0f && std::fabs(gy - y) <= 26.0f)
+            return entry;
+    }
+    return -1;
+}
+
+int modernCameraInventoryCurrent(const uint8_t* ram) {
+    uint32_t pointer = 0;
+    std::memcpy(&pointer, ram + 0x755e64u, 4);
+    if (pointer < 0x755ef0u || (pointer - 0x755ef0u) % 0xb8u != 0)
+        return -1;
+    const int entry = int((pointer - 0x755ef0u) / 0xb8u);
+    return entry < 64 ? entry : -1;
+}
+
+// Walk the game's cursor toward a slot the way the inventory navigates: LEFT from
+// a left-column slot moves to the next panel in a cycle (local -> partners ->
+// local), so a different panel is reached by pressing LEFT; inside a panel the
+// column and row are adjusted, and the local weapon sits below its slots.
+// Gives up after 12 presses for one target (e.g. an absent partner panel).
+uint16_t modernCameraInventoryStep(int current, int target) {
+    static int lastTarget = -1, lastCurrent = -1, presses = 0;
+    static uint16_t lastStep = 0;
+    if (target != lastTarget) {
+        lastTarget = target;
+        presses = 0;
+        lastStep = 0;
+    }
+    const bool stalled = lastStep && current == lastCurrent;
+    lastCurrent = current;
+    if (++presses > 12)
+        return lastStep = 0;
+    auto panelOf = [](int entry) { return entry == 49 ? 0 : entry / 12; };
+    if (panelOf(current) != panelOf(target)) {
+        // Some slots (the local top-left) do not leave the panel with LEFT:
+        // step down a row and try again.
+        if (stalled && lastStep == reo::PS2_LEFT && current != 49 && (current % 12) < 2)
+            return lastStep = reo::PS2_DOWN;
+        return lastStep = reo::PS2_LEFT;
+    }
+    if (current == 49)
+        return lastStep = reo::PS2_UP;
+    if (target == 49)
+        return lastStep = reo::PS2_DOWN;
+    const int slot = current % 12, goal = target % 12;
+    if ((slot & 1) != (goal & 1))
+        return lastStep = (goal & 1) ? reo::PS2_RIGHT : reo::PS2_LEFT;
+    if ((slot >> 1) != (goal >> 1))
+        return lastStep = (goal >> 1) ? reo::PS2_DOWN : reo::PS2_UP;
+    return lastStep = 0;
+}
+
+// Automated menu tests: REO_TEST_MENU_CURSOR="sec:x,y;..." places a virtual cursor
+// (game image coordinates) from that pad-script time; REO_TEST_MENU_CLICK="sec;..."
+// clicks it. The real mouse is never moved.
+struct MenuTestCursor {
+    std::vector<std::pair<double, std::pair<float, float>>> points;
+    std::vector<double> clicks;
+    MenuTestCursor() {
+        if (const char* text = std::getenv("REO_TEST_MENU_CURSOR")) {
+            std::string all(text);
+            size_t at = 0;
+            while (at < all.size()) {
+                const size_t end = all.find(';', at);
+                double t = 0;
+                float x = 0, y = 0;
+                if (std::sscanf(all.substr(at, end - at).c_str(), "%lf:%f,%f", &t, &x, &y) == 3)
+                    points.push_back({t, {x, y}});
+                at = end == std::string::npos ? all.size() : end + 1;
+            }
+        }
+        if (const char* text = std::getenv("REO_TEST_MENU_CLICK")) {
+            std::string all(text);
+            size_t at = 0;
+            while (at < all.size()) {
+                const size_t end = all.find(';', at);
+                clicks.push_back(std::atof(all.substr(at, end - at).c_str()));
+                at = end == std::string::npos ? all.size() : end + 1;
+            }
+        }
+    }
+    bool active() const { return !points.empty(); }
+    bool at(double now, float& x, float& y) const {
+        bool found = false;
+        for (const auto& point : points)
+            if (now >= point.first) {
+                x = point.second.first;
+                y = point.second.second;
+                found = true;
+            }
+        return found;
+    }
+    bool clicking(double now) const {
+        for (double t : clicks)
+            if (now >= t && now < t + 0.1)
+                return true;
+        return false;
+    }
+};
+
+uint16_t modernCameraKeys(const uint8_t* ram, double clock) {
+    static const MenuTestCursor testCursor;
     static auto focusedSince = std::chrono::steady_clock::now();
     static bool wasFocused = false;
     if (!reo::modern_camera::active())
@@ -2482,32 +2634,85 @@ uint16_t modernCameraKeys(const uint8_t* ram) {
     }
     if (!modernCameraMouseEnabled())
         return 0;
-    if (settled && g_cameraCursorMode.load() == CursorArrow) {
-        if (down(VK_LBUTTON))
-            buttons |= reo::PS2_CROSS;
-        if (down(VK_RBUTTON))
-            buttons |= reo::PS2_CIRCLE;
-    }
-    // Wheel: one D-pad press per notch (3 ticks down, 2 ticks released).
+    const bool arrow = testCursor.active() || (settled && g_cameraCursorMode.load() == CursorArrow);
+    // One short D-pad/button press at a time (3 ticks down, 3 ticks released) so
+    // the game registers each step.
     static int pulseTicks = 0, gapTicks = 0;
     static uint16_t pulseButton = 0;
     if (pulseTicks > 0) {
         buttons |= pulseButton;
         if (--pulseTicks == 0)
-            gapTicks = 2;
+            gapTicks = 3;
     } else if (gapTicks > 0) {
         --gapTicks;
-    } else if (const int wheel = g_cameraWheel.load(); wheel >= WHEEL_DELTA || wheel <= -WHEEL_DELTA) {
-        g_cameraWheel.fetch_sub(wheel > 0 ? WHEEL_DELTA : -WHEEL_DELTA);
-        pulseButton = wheel > 0 ? reo::PS2_UP : reo::PS2_DOWN;
+    }
+    const bool idle = pulseTicks == 0 && gapTicks == 0;
+    auto pulse = [&](uint16_t button) {
+        pulseButton = button;
         pulseTicks = 3;
-        buttons |= pulseButton;
+        buttons |= button;
+    };
+    const bool lmb = arrow && (testCursor.active() ? testCursor.clicking(clock) : down(VK_LBUTTON));
+    static bool lmbWas = false;
+    const bool click = lmb && !lmbWas;
+    lmbWas = lmb;
+
+    // Inventory (0x755EC4 == 1 in a room): hovering a slot walks the game's own
+    // cursor there; clicking a slot selects it first, then confirms.
+    int hover = -1, current = -1;
+    const bool inventory = ram && ram[0x4badd0u] == 2u && ram[0x755ec4u] == 1u;
+    if (inventory && arrow) {
+        POINT cursor{};
+        float gx = 0, gy = 0;
+        if (testCursor.active() ? testCursor.at(clock, gx, gy)
+                                : GetCursorPos(&cursor) && modernCameraGamePoint(cursor, gx, gy))
+            hover = modernCameraInventoryEntryAt(gx, gy);
+        current = modernCameraInventoryCurrent(ram);
+    }
+    // Navigate only when the slot under the mouse changes (or on a click), so a
+    // resting mouse never fights keyboard/controller navigation.
+    static int pendingClick = -1, lastHover = -1, hoverTarget = -1;
+    if (!inventory || !arrow) {
+        pendingClick = hoverTarget = lastHover = -1;
+    } else if (hover != lastHover) {
+        lastHover = hover;
+        hoverTarget = hover;
+    }
+    if (hoverTarget >= 0 && hoverTarget == current)
+        hoverTarget = -1;
+    if (click && hover >= 0 && hover != current)
+        pendingClick = hover;
+    if (idle && inventory && arrow && current >= 0) {
+        const int target = pendingClick >= 0 ? pendingClick : hoverTarget;
+        if (target >= 0 && target == current && pendingClick >= 0) {
+            pendingClick = -1;
+            pulse(reo::PS2_CROSS);
+        } else if (target >= 0 && target != current) {
+            if (uint16_t step = modernCameraInventoryStep(current, target))
+                pulse(step);
+            else
+                pendingClick = hoverTarget = -1;
+        }
+    }
+    if (arrow) {
+        // Plain clicks confirm/go back (submenus, other screens, the current slot).
+        if (lmb && !(inventory && hover >= 0 && hover != current) && pendingClick < 0)
+            buttons |= reo::PS2_CROSS;
+        if (down(VK_RBUTTON))
+            buttons |= reo::PS2_CIRCLE;
+    }
+    // Wheel: one D-pad up/down press per notch.
+    if (idle && !(buttons & (reo::PS2_UP | reo::PS2_DOWN | reo::PS2_LEFT | reo::PS2_RIGHT))) {
+        if (const int wheel = g_cameraWheel.load(); wheel >= WHEEL_DELTA || wheel <= -WHEEL_DELTA) {
+            g_cameraWheel.fetch_sub(wheel > 0 ? WHEEL_DELTA : -WHEEL_DELTA);
+            pulse(wheel > 0 ? reo::PS2_UP : reo::PS2_DOWN);
+        }
     }
     return buttons;
 }
 #else
 void modernCameraMouse(const uint8_t*) {}
-uint16_t modernCameraKeys(const uint8_t*) { return 0; }
+uint16_t modernCameraKeys(const uint8_t*, double) { return 0; }
 #endif
 
 void pad2FeederLoop() {
@@ -2570,7 +2775,7 @@ void pad2FeederLoop() {
             }
             // Modern camera: right stick/mouse orbit the camera (L2 keeps fixed chat),
             // D-pad walks camera-relative, plus PC mouse buttons and Shift to run.
-            pressed |= modernCameraKeys(routeRam);
+            pressed |= modernCameraKeys(routeRam, now);
             reo::modern_camera::filterPad(routeRam, hostPad, pressed);
             modernCameraMouse(routeRam);
             g_pad2.lastPressed = pressed;

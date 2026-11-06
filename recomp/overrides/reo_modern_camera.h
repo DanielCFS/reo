@@ -378,7 +378,7 @@ inline void cameraApply(uint8_t* ram, R5900Context* ctx, PS2Runtime* runtime) {
     o0_00375920_0x375920(ram, ctx, runtime);
 }
 
-// REO_MODERN_CAMERA_PROBE=3: every 20 frame services outside free gameplay, write
+// REO_MODERN_CAMERA_PROBE=3: every 40 frame services outside free gameplay, write
 // all 32 MiB of guest RAM to modcam_ram_<n>.bin and log the elapsed time
 // (menu reverse engineering; RAM dumps stay in the private run folder).
 inline void snapshotRam(const uint8_t* ram) {
@@ -388,7 +388,7 @@ inline void snapshotRam(const uint8_t* ram) {
     }();
     static unsigned calls = 0, index = 0;
     static const auto start = std::chrono::steady_clock::now();
-    if (!on || ram[game.gameState] != 2u || freeGameplay(ram) || ++calls % 20 != 0 || index >= 60)
+    if (!on || ram[game.gameState] != 2u || freeGameplay(ram) || ++calls % 40 != 0 || index >= 30)
         return;
     char name[64];
     std::snprintf(name, sizeof(name), "modcam_ram_%03u.bin", index);
@@ -410,11 +410,11 @@ inline void watchRam(const uint8_t* ram) {
         parsed = true;
         if (const char* text = std::getenv("REO_MODERN_CAMERA_WATCH"))
             std::sscanf(text, "%x:%x", &address, &length);
-        if (length > 64u || address + length > 0x2000000u)
+        if (length > 128u || address + length > 0x2000000u)
             length = 0;
     }
     static unsigned calls = 0;
-    static uint8_t last[64] = {};
+    static uint8_t last[128] = {};
     static const auto start = std::chrono::steady_clock::now();
     if (!length || ++calls % 6 != 0 || std::memcmp(last, ram + address, length) == 0)
         return;
