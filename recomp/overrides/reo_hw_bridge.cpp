@@ -2306,8 +2306,7 @@ bool pad2TestInteractQuit(uint8_t* rd, double now, reo::DualShock2State& pad, ui
 }
 
 // Fast loading (REO_FAST_LOADING=1): while the game sits in its loading states
-// (0x4BADD0: 1 room load, 3 door transition, 14 scenario setup, and the door
-// exit while 0x4BAE07 == 1; 3 there follows cutscenes) the emulated vblank runs 8x faster,
+// (0x4BADD0: 1 room load, 3 door transition, 14 scenario setup) the emulated vblank runs 8x faster,
 // so the loader's per-frame texture uploads and fades finish sooner. Gameplay,
 // menus, movies and cutscenes always run at normal speed. The runtime reads the
 // factor (patch 0120).
@@ -2324,7 +2323,9 @@ void reoFastLoading(const uint8_t* ram) {
     if (!enabled || !ram)
         return;
     const uint8_t state = ram[0x4badd0u];
-    const bool loading = state == 1u || state == 3u || state == 14u || (state == 2u && ram[0x4bae07u] == 1u);
+    // The door exit (gameplay with the door request set) shows the character
+    // opening the door and stays at normal speed; only the load runs faster.
+    const bool loading = state == 1u || state == 3u || state == 14u;
     g_reoVblankTurbo.store(loading ? factor : 1, std::memory_order_relaxed);
 }
 
