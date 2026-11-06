@@ -561,7 +561,7 @@
                   </Grid.ColumnDefinitions>
                   <compat:Rc1TextBlock Text="PS2 button mapping" FontSize="14" Foreground="{StaticResource Muted}" VerticalAlignment="Center" />
                   <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                    <Button x:Name="ModernBindingsButton" Click="UseModernBindings" Content="RE2 Remake layout" Margin="0,0,8,0" ToolTip.Tip="WASD move, F interact, Backspace cancel, V ad-lib, M map, R reload, Tab inventory, Esc pause. With Modern camera: mouse look, right/left mouse button aim/fire, Shift run." />
+                    <Button x:Name="ModernBindingsButton" Click="UseModernBindings" Content="RE2 Remake layout" Margin="0,0,8,0" ToolTip.Tip="WASD move, F interact, Backspace cancel, V ad-lib, M map, T switch target, Tab inventory, Esc pause. With Modern camera: mouse look, right/left mouse button aim/fire, Shift run, R reload." />
                     <Button x:Name="ResetBindingsButton" Click="ResetBindings" Content="Reset bindings" />
                   </StackPanel>
                 </Grid>

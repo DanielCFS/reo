@@ -2646,9 +2646,10 @@ uint16_t modernCameraInventoryStep(int current, int target) {
 }
 
 // File #1 menus with mouse hover. Inventory grid: 0x755EC4 == 1. Item submenu:
-// 0x755EC4 == 1 and 0x755EC1 == 2, option index at 0x755E62. Pause: 0x755EC4 == 4,
+// 0x755EC4 == 1 and 0x755EC2 == 1, option index at 0x755E62 (0x755EC1 is 2
+// whenever the grid cursor rests on the weapon, submenu or not). Pause: 0x755EC4 == 4,
 // option index at 0x755EC1 (0 TYPE .. 10 EXIT).
-enum ModernCameraMenuKind { MenuNone, MenuGrid, MenuList, MenuCarousel };
+enum ModernCameraMenuKind { MenuNone, MenuGrid, MenuList, MenuCarousel, MenuRow };
 struct ModernCameraMenu {
     ModernCameraMenuKind kind = MenuNone;
     int current = -1;
@@ -2690,18 +2691,108 @@ ModernCameraMenu modernCameraFrontendState(const uint8_t* ram, int& screen) {
         screen = 3;
         return {MenuCarousel, 2};
     }
+    // Scenario select (chapter list, state 0x0108; cursor +0x260 of +0x25C):
+    // a horizontal carousel with the selected card left of centre.
+    if (modernCameraPointer(selection, 0x264u) && (modernCameraWord(ram, selection + 4u) & 0xffffu) == 0x0108u &&
+        modernCameraWord(ram, selection + 0x20u) == 0) {
+        screen = 4;
+        return {MenuCarousel, 2};
+    }
     return {};
+}
+
+// File #1 network lobby (BIN3 overlay; root 0x6D8DB0, read bank-aware): state +0,
+// sub +1, menu +0xE, phase +0xF, nested +0x10, chat/modal +0x13/+0x14/+0x54F, mode
+// +0x41A (1 lobby, 7 server select). Cursors: buttons +0x8DE, rule rows +0x8DF,
+// visible area row +0x447 (+0x446 scroll), visible room row +0x445 (+0x444 scroll). The outer network step 0x6DF150/1 is 37/7.
+enum ModernCameraLobbyScreen { LobbyNone, LobbyServers, LobbyTop, LobbyAreas, LobbyRooms, LobbyRules, LobbyWaiting };
+int g_cameraLobbyScreen = LobbyNone; // feeder thread only
+
+ModernCameraMenu modernCameraLobbyState(const uint8_t* ram) {
+    g_cameraLobbyScreen = LobbyNone;
+    if (modernCameraByte(ram, 0x6df150u) != 37u || modernCameraByte(ram, 0x6df151u) != 7u)
+        return {};
+    constexpr uint32_t root = 0x6d8db0u;
+    auto at = [&](uint32_t offset) { return modernCameraByte(ram, root + offset); };
+    const uint8_t mode = at(0x41au);
+    if (mode == 7u && modernCameraByte(ram, 0x6995a0u) == 3u && at(0x8d8u) == 2u && at(0x8d9u) == 0u) {
+        g_cameraLobbyScreen = LobbyServers;
+        return {MenuRow, int(at(0x8deu))};
+    }
+    if (mode != 1u || at(0x13u) || at(0x14u) || at(0x54fu))
+        return {};
+    const uint8_t state = at(0), sub = at(1), menu = at(0xeu), phase = at(0xfu), nested = at(0x10u);
+    if (sub != 0u)
+        return {};
+    if (state == 2u && menu == 1u && phase == 0u) {
+        g_cameraLobbyScreen = LobbyTop;
+        return {MenuRow, int(at(0x8deu))};
+    }
+    if (state == 2u && menu == 5u && phase == 0u) {
+        g_cameraLobbyScreen = LobbyAreas;
+        return {MenuList, int(at(0x447u))};
+    }
+    if (state == 3u && menu == 1u && phase == 0u) {
+        g_cameraLobbyScreen = LobbyRooms;
+        return {MenuList, int(at(0x445u))};
+    }
+    if (state == 3u && menu == 3u && phase == 2u && nested == 1u) {
+        g_cameraLobbyScreen = LobbyRules;
+        return {MenuList, int(at(0x8dfu))};
+    }
+    if (state == 4u && phase == 6u && nested == 2u) {
+        g_cameraLobbyScreen = LobbyWaiting;
+        return {MenuRow, int(at(0x8deu))};
+    }
+    return {};
+}
+
+int modernCameraLobbyHoverAt(float gx, float gy) {
+    switch (g_cameraLobbyScreen) {
+    case LobbyTop: // ROOM LIST | DATABASE
+        if (gy < 322.0f || gy > 355.0f)
+            return -1;
+        return gx >= 48.0f && gx <= 308.0f ? 0 : gx >= 333.0f && gx <= 591.0f ? 1 : -1;
+    case LobbyAreas: // seven 39-line rows
+        if (gx < 215.0f || gx > 427.0f || gy < 67.0f || gy >= 67.0f + 7 * 39.3f)
+            return -1;
+        return int((gy - 67.0f) / 39.3f);
+    case LobbyRooms: // five 55-line rows
+        if (gx < 50.0f || gx > 577.0f || gy < 89.0f || gy >= 89.0f + 5 * 55.0f)
+            return -1;
+        return std::fmod(gy - 89.0f, 55.0f) < 52.0f ? int((gy - 89.0f) / 55.0f) : -1;
+    case LobbyRules: { // 27.5-line rows; 6 and 7 are not shown
+        if (gx < 50.0f || gx > 592.0f || gy < 80.0f || gy >= 80.0f + 11 * 27.5f)
+            return -1;
+        const int row = int((gy - 80.0f) / 27.5f);
+        return row == 6 || row == 7 ? -1 : row;
+    }
+    case LobbyWaiting: { // START SCENARIO | STANDBY | EXIT | MEMBER DATA
+        if (gy < 322.0f || gy > 355.0f)
+            return -1;
+        static const float edges[4][2] = {{50, 214}, {223, 340}, {350, 466}, {475, 591}};
+        for (int i = 0; i < 4; ++i)
+            if (gx >= edges[i][0] && gx <= edges[i][1])
+                return i;
+        return -1;
+    }
+    default:
+        return -1;
+    }
 }
 
 ModernCameraMenu modernCameraMenuState(const uint8_t* ram) {
     if (!ram)
         return {};
+    if (ram[0x4badd0u] != 2u)
+        if (const ModernCameraMenu lobby = modernCameraLobbyState(ram); lobby.kind != MenuNone)
+            return lobby;
     if (ram[0x4badd0u] != 2u) {
         int screen = 0;
         return modernCameraFrontendState(ram, screen);
     }
     const uint8_t screen = ram[0x755ec4u];
-    if (screen == 1u && ram[0x755ec1u] == 2u)
+    if (screen == 1u && ram[0x755ec2u] == 1u)
         return {MenuList, int(ram[0x755e62u])};
     if (screen == 1u && ram[0x759c9eu] == 0u) // ITEM tab
         return {MenuGrid, modernCameraInventoryCurrent(ram)};
@@ -2713,6 +2804,8 @@ ModernCameraMenu modernCameraMenuState(const uint8_t* ram) {
 int modernCameraMenuHoverAt(const uint8_t* ram, const ModernCameraMenu& menu, float gx, float gy) {
     if (menu.kind == MenuGrid)
         return modernCameraInventoryEntryAt(gx, gy);
+    if (g_cameraLobbyScreen != LobbyNone)
+        return modernCameraLobbyHoverAt(gx, gy);
     if (ram[0x4badd0u] != 2u) {
         int screen = 0;
         modernCameraFrontendState(ram, screen);
@@ -2720,6 +2813,18 @@ int modernCameraMenuHoverAt(const uint8_t* ram, const ModernCameraMenu& menu, fl
             return int((gy - 253.0f) / 24.0f); // main menu: 6 options, 24 lines apart
         if (screen == 2 && gx >= 240.0f && gx <= 400.0f && gy >= 277.0f && gy < 277.0f + 2 * 24.0f)
             return int((gy - 277.0f) / 24.0f); // single-play submenu
+        if (screen == 4 && gy >= 85.0f && gy <= 260.0f) {
+            // Cards: previous (wrapped) at the left edge, selected, next two.
+            if (gx < 95.0f)
+                return 1;
+            if (gx >= 120.0f && gx <= 366.0f)
+                return 2;
+            if (gx >= 394.0f && gx <= 543.0f)
+                return 3;
+            if (gx > 548.0f)
+                return 4;
+            return -1;
+        }
         if (screen == 3 && gy >= 100.0f && gy <= 240.0f) {
             static const float places[8] = {68, 140, 210, 284, 355, 427, 502, 572};
             for (int place = 0; place < 8; ++place)
@@ -2917,8 +3022,8 @@ uint16_t modernCameraKeys(const uint8_t* ram, double clock) {
         hoverTarget = -1;
     if (click && hover >= 0 && hover != current)
         pendingClick = hover;
-    // Character carousel: clicking another character rotates the roster to bring
-    // it into the selection; clicking the selected character confirms. Hovering
+    // Character and scenario carousels: clicking another card rotates it into
+    // the selection; clicking the selected card confirms. Hovering
     // alone does not rotate (the roster would move under the mouse).
     static int carouselSteps = 0;
     static bool carouselConfirm = false;
@@ -2950,8 +3055,10 @@ uint16_t modernCameraKeys(const uint8_t* ram, double clock) {
             pendingClick = -1;
             pulse(reo::PS2_CROSS);
         } else if (target >= 0 && target != current) {
-            const uint16_t step = menu.kind == MenuGrid ? modernCameraInventoryStep(current, target)
-                                                        : modernCameraListStep(current, target);
+            uint16_t step = menu.kind == MenuGrid ? modernCameraInventoryStep(current, target)
+                                                  : modernCameraListStep(current, target);
+            if (menu.kind == MenuRow) // horizontal buttons
+                step = step == reo::PS2_DOWN ? reo::PS2_RIGHT : step == reo::PS2_UP ? reo::PS2_LEFT : 0;
             if (step)
                 pulse(step);
             else
@@ -2962,7 +3069,7 @@ uint16_t modernCameraKeys(const uint8_t* ram, double clock) {
     // switches to it with R1/L1.
     static int tabTarget = -1;
     int tabHover = -1;
-    const bool tabs = ram && ram[0x4badd0u] == 2u && ram[0x755ec4u] == 1u && ram[0x755ec1u] != 2u &&
+    const bool tabs = ram && ram[0x4badd0u] == 2u && ram[0x755ec4u] == 1u && ram[0x755ec2u] != 1u &&
                       ram[0x759c9eu] <= 2u;
     if (tabs && arrow) {
         POINT cursor{};
@@ -2983,10 +3090,30 @@ uint16_t modernCameraKeys(const uint8_t* ram, double clock) {
         else
             pulse(tabTarget > tab ? reo::PS2_R1 : reo::PS2_L1);
     }
+    // Network server select: the arrows beside the server card turn it. Room
+    // rules: a click on the value of the selected row (players, time, difficulty,
+    // friendly fire, scenario, character) steps it, left part back, rest forward.
+    bool serverArrow = false;
+    if (arrow && inMenu && (g_cameraLobbyScreen == LobbyServers || g_cameraLobbyScreen == LobbyRules)) {
+        POINT cursor{};
+        float gx = 0, gy = 0;
+        if (testCursor.active() ? testCursor.at(clock, gx, gy)
+                                : GetCursorPos(&cursor) && modernCameraGamePoint(cursor, gx, gy)) {
+            uint16_t turn = 0;
+            if (g_cameraLobbyScreen == LobbyServers && gy >= 165.0f && gy <= 222.0f)
+                turn = gx >= 115.0f && gx <= 168.0f ? reo::PS2_LEFT : gx >= 470.0f && gx <= 525.0f ? reo::PS2_RIGHT : 0;
+            else if (g_cameraLobbyScreen == LobbyRules && hover == current && gx >= 280.0f &&
+                     (current == 2 || current == 3 || current == 4 || current == 5 || current == 8 || current == 9))
+                turn = gx < 360.0f ? reo::PS2_LEFT : reo::PS2_RIGHT;
+            serverArrow = turn != 0;
+            if (click && turn && idle)
+                pulse(turn);
+        }
+    }
     const bool inventory = inMenu || tabHover >= 0; // a click elsewhere in a supported menu still confirms
     if (arrow) {
         // Plain clicks confirm/go back (submenus, other screens, the current slot).
-        if (lmb && !(inventory && hover >= 0 && hover != current) && pendingClick < 0 && tabHover < 0 &&
+        if (lmb && !serverArrow && !(inventory && hover >= 0 && hover != current) && pendingClick < 0 && tabHover < 0 &&
             !(menu.kind == MenuCarousel && hover >= 0))
             buttons |= reo::PS2_CROSS;
         if (down(VK_RBUTTON))
@@ -3001,9 +3128,146 @@ uint16_t modernCameraKeys(const uint8_t* ram, double clock) {
     }
     return buttons;
 }
+
+// R (modern camera): reload the equipped weapon. Outbreak has no reload button;
+// the inventory offers RELOAD as the second option of the equipped weapon
+// (entry 49), so the key drives the game's own menu: open the inventory, walk
+// to the weapon, open its submenu, choose RELOAD, then close the inventory.
+// Co-op peers see an ordinary menu reload. While the sequence runs (and until R
+// is released) it replaces all other input, including whatever R is bound to.
+// REO_TEST_RELOAD_AT="sec;..." starts it at pad-script times in tests.
+uint16_t modernCameraReload(const uint8_t* ram, double clock, bool& active) {
+    enum { Idle, Open, Walk, Choose, Close, Release };
+    static int phase = Idle, ticks = 0, pulseTicks = 0, gapTicks = 0;
+    static uint16_t pulseButton = 0;
+    static bool keyWas = false;
+    static const std::vector<double> testTimes = [] {
+        std::vector<double> times;
+        if (const char* text = std::getenv("REO_TEST_RELOAD_AT")) {
+            std::string all(text);
+            for (size_t at = 0; at < all.size();) {
+                const size_t end = all.find(';', at);
+                times.push_back(std::atof(all.substr(at, end - at).c_str()));
+                at = end == std::string::npos ? all.size() : end + 1;
+            }
+        }
+        return times;
+    }();
+    active = false;
+    if (!reo::modern_camera::active() || !ram)
+        return 0;
+    bool test = false;
+    for (double t : testTimes)
+        test |= clock >= t && clock < t + 0.2;
+    const bool key = test || (modernCameraFocusedWindow() && (GetAsyncKeyState('R') & 0x8000) != 0);
+    const bool pressedNow = key && !keyWas;
+    keyWas = key;
+    const bool inventory = ram[0x4badd0u] == 2u && ram[0x755ec4u] == 1u;
+    if (phase == Idle) {
+        if (!pressedNow || !reo::modern_camera::freeGameplay(ram))
+            return 0;
+        phase = Open;
+        ticks = pulseTicks = gapTicks = 0;
+    }
+    active = true;
+    ++ticks;
+    static int loggedPhase = -1;
+    if (phase != loggedPhase && std::getenv("REO_MODERN_CAMERA_MENU_LOG")) {
+        loggedPhase = phase;
+        std::fprintf(stderr, "[MODCAM-RELOAD] t=%.2f phase=%d inventory=%d entry=%d submenu=%u option=%u\n", clock,
+                     phase, int(inventory), modernCameraInventoryCurrent(ram), ram[0x755ec2u], ram[0x755e62u]);
+    }
+    if (pulseTicks > 0) {
+        if (--pulseTicks == 0)
+            gapTicks = 5;
+        return pulseButton;
+    }
+    if (gapTicks > 0) {
+        --gapTicks;
+        return 0;
+    }
+    auto press = [&](uint16_t button) {
+        pulseButton = button;
+        pulseTicks = 3;
+        return button;
+    };
+    // Give up after about 5 s (an animation, a message, no weapon) and close.
+    if (phase != Close && phase != Release && ticks > 300)
+        phase = Close;
+    const int entry = modernCameraInventoryCurrent(ram);
+    switch (phase) {
+    case Open:
+        // Let a readied weapon be lowered first (input is withheld meanwhile).
+        if (inventory) {
+            phase = Walk;
+            return 0;
+        }
+        if (!reo::modern_camera::freeGameplay(ram)) {
+            // The inventory is opening (after START), or something else took over.
+            if (ticks > 120)
+                phase = Release;
+            return 0;
+        }
+        if (reo::modern_camera::aiming(ram) || ram[reo::modern_camera::localActor(ram) + 8u] != 1u)
+            return 0;
+        return press(reo::PS2_START);
+    case Walk:
+        if (!inventory) {
+            phase = Release;
+            return 0;
+        }
+        if (ram[0x759c9eu] != 0u) // another tab: back to ITEM
+            return press(reo::PS2_L1);
+        if (ram[0x755ec2u] == 1u)
+            return press(reo::PS2_CIRCLE);
+        if (entry == 49) {
+            phase = Choose;
+            return press(reo::PS2_CROSS);
+        }
+        if (entry < 0)
+            return 0;
+        if (const uint16_t step = modernCameraInventoryStep(entry, 49))
+            return press(step);
+        phase = Close;
+        return 0;
+    case Choose:
+        if (!inventory) {
+            phase = Release;
+            return 0;
+        }
+        if (ram[0x755ec2u] != 1u)
+            return 0; // submenu still opening
+        if (ram[0x755e62u] != 1u)
+            return press(ram[0x755e62u] < 1u ? reo::PS2_DOWN : reo::PS2_UP);
+        phase = Close;
+        ticks = 0;
+        return press(reo::PS2_CROSS);
+    case Close:
+        // Wait for the reload to start, then leave the inventory.
+        if (!inventory) {
+            phase = Release;
+            return 0;
+        }
+        if (ticks < 30)
+            return 0;
+        if (ticks > 600) {
+            phase = Release;
+            return 0;
+        }
+        return press(ram[0x755ec2u] == 1u ? reo::PS2_CIRCLE : reo::PS2_START);
+    default:
+        if (!key)
+            phase = Idle;
+        return 0;
+    }
+}
 #else
 void modernCameraMouse(const uint8_t*) {}
 uint16_t modernCameraKeys(const uint8_t*, double) { return 0; }
+uint16_t modernCameraReload(const uint8_t*, double, bool& active) {
+    active = false;
+    return 0;
+}
 #endif
 
 void pad2FeederLoop() {
@@ -3074,6 +3338,12 @@ void pad2FeederLoop() {
             modernCameraTransitionLog(routeRam, now);
             reoFastLoading(routeRam);
             pressed |= modernCameraKeys(routeRam, now);
+            bool reloading = false;
+            const uint16_t reload = modernCameraReload(routeRam, now, reloading);
+            if (reloading) {
+                pressed = reload;
+                hostPad.left_x = hostPad.left_y = 0x80;
+            }
             reo::modern_camera::filterPad(routeRam, hostPad, pressed);
             modernCameraMouse(routeRam);
             g_pad2.lastPressed = pressed;
