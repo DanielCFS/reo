@@ -74,6 +74,8 @@
 #include <xinput.h>
 #endif
 #include "reo_modern_camera.h"
+// Runtime vblank fast-forward factor (PS2Recomp patch 0120).
+extern std::atomic<int> g_reoVblankTurbo;
 
 void reoPad2Stop();
 
@@ -2303,6 +2305,63 @@ bool pad2TestInteractQuit(uint8_t* rd, double now, reo::DualShock2State& pad, ui
     return true;
 }
 
+// Fast loading (REO_FAST_LOADING=1): while the game sits in its loading states
+// (0x4BADD0: 1 room load, 14 scenario setup) the emulated vblank runs 8x faster,
+// so the loader's per-frame texture uploads and fades finish sooner. Gameplay,
+// menus, movies and cutscenes always run at normal speed. The runtime reads the
+// factor (patch 0120).
+void reoFastLoading(const uint8_t* ram) {
+    static const bool enabled = [] {
+        const char* value = std::getenv("REO_FAST_LOADING");
+        return value && std::strcmp(value, "1") == 0;
+    }();
+    static const int factor = [] {
+        const char* value = std::getenv("REO_FAST_LOADING_FACTOR");
+        const int f = value ? std::atoi(value) : 8;
+        return f < 2 ? 2 : f > 16 ? 16 : f;
+    }();
+    if (!enabled || !ram)
+        return;
+    const uint8_t state = ram[0x4badd0u];
+    g_reoVblankTurbo.store(state == 1u || state == 14u ? factor : 1, std::memory_order_relaxed);
+}
+
+// Room transition timing (modern camera sessions): one line whenever the game
+// state, room, door request/destination or UI screen changes, with the sectors
+// read from disc and the host read time since the previous line, to tell disc
+// time from the game's own fades and waits.
+void modernCameraTransitionLog(const uint8_t* ram, double now) {
+    if (!ram || !reo::modern_camera::active())
+        return;
+    struct State {
+        uint8_t state, substate, request, screen;
+        uint16_t room, destination;
+        bool operator!=(const State& o) const {
+            return state != o.state || substate != o.substate || request != o.request || screen != o.screen || room != o.room ||
+                   destination != o.destination;
+        }
+    };
+    State current{ram[0x4badd0u], ram[0x4badd1u], ram[0x4bae07u], ram[0x755ec4u], 0, 0};
+    std::memcpy(&current.room, ram + 0x3243dcu, 2);
+    std::memcpy(&current.destination, ram + 0x3243e2u, 2);
+    static State last{0xff, 0xff, 0xff, 0xff, 0xffff, 0xffff};
+    static uint64_t lastSectors = 0, lastNs = 0;
+    static double lastTime = 0;
+    if (!(current != last))
+        return;
+    const uint64_t sectors = reo::load_stats::sectors.load(std::memory_order_relaxed);
+    const uint64_t ns = reo::load_stats::nanoseconds.load(std::memory_order_relaxed);
+    std::fprintf(stderr,
+                 "[ROOM-TRANSITION] t=%.3f +%.3fs state=%u.%u room=%u request=%u destination=%u screen=%u "
+                 "disc=+%llu sectors/%.0f ms\n",
+                 now, now - lastTime, current.state, current.substate, current.room, current.request, current.destination,
+                 current.screen, (unsigned long long)(sectors - lastSectors), double(ns - lastNs) / 1e6);
+    last = current;
+    lastSectors = sectors;
+    lastNs = ns;
+    lastTime = now;
+}
+
 // Modern camera mouse (PC controls), with the game focused:
 // - free gameplay: the cursor is hidden, confined to the game window and re-centred
 //   every feeder tick; its movement turns the camera;
@@ -2991,6 +3050,8 @@ void pad2FeederLoop() {
             }
             // Modern camera: right stick/mouse orbit the camera (L2 keeps fixed chat),
             // D-pad walks camera-relative, plus PC mouse buttons and Shift to run.
+            modernCameraTransitionLog(routeRam, now);
+            reoFastLoading(routeRam);
             pressed |= modernCameraKeys(routeRam, now);
             reo::modern_camera::filterPad(routeRam, hostPad, pressed);
             modernCameraMouse(routeRam);

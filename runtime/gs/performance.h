@@ -11,6 +11,11 @@ namespace reo::overlay {
 inline std::atomic<uint32_t> crosshair{0};
 } // namespace reo::overlay
 
+namespace reo::load_stats {
+// Disc reads completed (sectors) and host read time, for load-time diagnostics.
+inline std::atomic<uint64_t> sectors{0}, nanoseconds{0};
+} // namespace reo::load_stats
+
 namespace reo::performance {
 inline bool enabled() {
     static const bool value = [] {

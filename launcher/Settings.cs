@@ -29,6 +29,8 @@ public sealed partial class Settings {
     // Over-the-shoulder camera that follows the local character (File #1). Off keeps
     // the original fixed room cameras.
     public bool ModernCamera { get; set; }
+    // Run the emulated vblank faster while the game shows its loading screens.
+    public bool FastLoading { get; set; } = true;
     [System.Text.Json.Serialization.JsonIgnore]
     public string ResolvedFit => ScreenFit is "stretch" or "center" or "fill" ? ScreenFit : "fit";
     public bool LinearFilter { get; set; } = true;

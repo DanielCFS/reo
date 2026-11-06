@@ -451,9 +451,18 @@ inline bool follow(uint8_t* ram) {
                                   std::sin(restingPitch()) * view.distance, z + rz * view.side - dz * view.distance};
         const float sx = eyeFull[0] - chest[0], sy = eyeFull[1] - chest[1], sz = eyeFull[2] - chest[2];
         const float length = std::sqrt(sx * sx + sy * sy + sz * sz);
-        const float hit = firstWallHit(chest, eyeFull);
-        if (hit < 1.0f && length > 1.0f)
-            clear = std::max(0.0f, hit - 25.0f / length);
+        // Five rays (centre and the four edges of the view near the eye) so a
+        // grazing wall cannot enter the edge of the picture; keep 35 units off.
+        float hit = 1.0f;
+        if (length > 1.0f) {
+            const float offsets[5][2] = {{0, 0}, {28, 0}, {-28, 0}, {0, 18}, {0, -18}};
+            for (const auto& o : offsets) {
+                const float to[3] = {eyeFull[0] + rx * o[0], eyeFull[1] + o[1], eyeFull[2] + rz * o[0]};
+                hit = std::fmin(hit, firstWallHit(chest, to));
+            }
+            if (hit < 1.0f)
+                clear = std::max(0.0f, hit - 35.0f / length);
+        }
     }
     clearance = clear < clearance ? clear : std::fmin(clear, clearance + dt * 1.5f);
     // Closest view: just behind the shoulder; the look direction is unchanged.

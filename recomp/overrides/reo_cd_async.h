@@ -18,7 +18,9 @@
 #include "ps2_syscalls.h"
 #include "reo_hw_bridge.h"
 #include "reo_game_clock_observer.h"
+#include "runtime/gs/performance.h"
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
@@ -45,6 +47,7 @@ inline std::deque<Request> queue;
 inline std::once_flag started;
 inline std::atomic<unsigned> logged{0};
 
+
 inline void configure(const char* serial, uint8_t* memory, size_t bytes) {
     if (const char* value = std::getenv("REO_CD_ASYNC"); value && !std::strcmp(value, "0"))
         return;
@@ -63,7 +66,12 @@ inline void configure(const char* serial, uint8_t* memory, size_t bytes) {
 
 inline void complete(const Request& request) {
     auto* bridge = ReoHwBridge::instance();
+    const auto readStart = std::chrono::steady_clock::now();
     const bool ok = bridge && bridge->readCdSectors(request.lsn, request.count, request.dst, ram);
+    reo::load_stats::sectors.fetch_add(request.count, std::memory_order_relaxed);
+    reo::load_stats::nanoseconds.fetch_add(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                           std::chrono::steady_clock::now() - readStart).count()),
+                              std::memory_order_relaxed);
     if (logged.fetch_add(1, std::memory_order_relaxed) < 40)
         std::fprintf(stderr, "[CD-ASYNC] read lsn=%u n=%u dst=0x%08X -> %s\n", request.lsn,
                      request.count, request.dst, ok ? "ok" : "FAIL");
@@ -104,9 +112,27 @@ inline void worker() {
     }
 }
 
+// During the game's own loading states (0x4BADD0: 1 room load, 14 scenario setup)
+// the loader polls each read's completion once per frame, so an asynchronous
+// read costs at least one frame even when the host read takes microseconds.
+// There, reads complete synchronously (the original HLE path): a brief host stall
+// is invisible behind the loading screen, and room loads take about 40% less.
+// Gameplay, movies and menus keep the asynchronous path. REO_CD_SYNC_LOADING=0
+// keeps every read asynchronous.
+inline bool loadingState(const uint8_t* memory) {
+    static const bool on = [] {
+        const char* value = std::getenv("REO_CD_SYNC_LOADING");
+        return !(value && !std::strcmp(value, "0"));
+    }();
+    if (!on)
+        return false;
+    const uint8_t state = memory[0x4badd0u];
+    return state == 1u || state == 14u;
+}
+
 // Bound at 0x1179E8 (SifCallRpc). Delegates everything except File #1's sceCdRead.
 inline void sifCallRpc(uint8_t* rdram, R5900Context* context, PS2Runtime* runtime) {
-    if (!enabled || rdram != ram || GPR_U32(context, 31) != return_address ||
+    if (!enabled || rdram != ram || loadingState(rdram) || GPR_U32(context, 31) != return_address ||
         GPR_U32(context, 4) != client || GPR_U32(context, 5) != 1u ||
         GPR_U32(context, 6) != 1u || GPR_U32(context, 7) != send ||
         GPR_U32(context, 8) != 0x18u || GPR_U32(context, 11) != callback) {

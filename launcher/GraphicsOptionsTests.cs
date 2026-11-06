@@ -27,7 +27,7 @@ internal static class GraphicsOptionsTests {
                     ["REO_PERFORMANCE_OVERLAY"] = "1", ["REO_GPU_MEMORY_LOG"] = "1",
                     ["REO_TEXTURE_ANISOTROPY"] = "16", ["REO_POST_AA"] = "smaa",
                     ["REO_BRIGHTNESS"] = "1.25", ["REO_GAMMA"] = "1.25",
-                    ["REO_MODERN_CAMERA"] = "1"
+                    ["REO_MODERN_CAMERA"] = "1", ["REO_FAST_LOADING"] = "1"
                 };
                 check(expected.All(p => launch.Environment.GetValueOrDefault(p.Key) == p.Value),
                       game + " saved graphics settings reach the renderer contract");

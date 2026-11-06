@@ -1,0 +1,25 @@
+--- a/ps2xRuntime/src/lib/Kernel/Syscalls/Interrupt.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Syscalls/Interrupt.cpp
+@@ -18,6 +18,10 @@
+ void ps2GsMarkVsync();       // ps2_gs_gpu.cpp: GS worker pacing (D39)
+ void ps2GsSnapshotDisplay(); // ps2_gs_gpu.cpp: post-flip display snapshot for present (D41)
+ 
++
++// REO: vblank fast-forward factor set by the game layer (1 = normal speed).
++std::atomic<int> g_reoVblankTurbo{1};
++
+ namespace ps2_syscalls
+ {
+     // [perf] heartbeat: DMA completions raised / delivered to a game handler, per channel.
+@@ -665,7 +669,10 @@
+                     std::fprintf(stderr, "[turbo] guest 0x%x became nonzero: normal speed\n", s_turboUntil);
+                 }
+             }
+-            const auto period = s_turboOn ? kVblankPeriod / s_turbo : kVblankPeriod;
++            // REO: dynamic fast-forward requested by the game layer (loading screens).
++            const int dynamicTurbo = std::min(std::max(g_reoVblankTurbo.load(std::memory_order_relaxed), 1), 16);
++            const int factor = std::max(s_turboOn ? s_turbo : 1, dynamicTurbo);
++            const auto period = factor > 1 ? kVblankPeriod / factor : kVblankPeriod;
+             const auto now = clock::now();
+             const auto diagnosticFirstDeadline=nextTick;
+             int ticksToProcess = 0;

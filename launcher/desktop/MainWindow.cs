@@ -57,6 +57,7 @@ public partial class MainWindow : Window {
         UpdateScreenFitHint();
         Fullscreen.IsChecked = settings.Fullscreen;
         ModernCamera.IsChecked = settings.ModernCamera;
+        FastLoading.IsChecked = settings.FastLoading;
         PerformanceOverlay.IsChecked = settings.PerformanceOverlay;
         AsyncVif.IsChecked = settings.AsyncVif;
         GpuMovies.IsChecked = settings.GpuMovies;
@@ -189,6 +190,7 @@ public partial class MainWindow : Window {
         UpdateScreenFitHint();
         settings.Fullscreen = Fullscreen.IsChecked == true;
         settings.ModernCamera = ModernCamera.IsChecked == true;
+        settings.FastLoading = FastLoading.IsChecked == true;
         settings.PerformanceOverlay = PerformanceOverlay.IsChecked == true;
         settings.AsyncVif = AsyncVif.IsChecked == true;
         if (GpuMovies.IsEnabled) // greyed out on an incompatible GPU; keep the saved choice

@@ -15,6 +15,7 @@ internal sealed record GraphicsOptions(bool Fullscreen, OutputSize Output, bool 
             ["REO_DISPLAY_ASPECT"] = settings.ResolvedAspect,
             ["REO_WIDESCREEN"] = settings.ResolvedWidescreen ? "1" : "0",
             ["REO_MODERN_CAMERA"] = settings.ModernCamera ? "1" : "0",
+            ["REO_FAST_LOADING"] = settings.FastLoading ? "1" : "0",
             ["REO_DISPLAY_FIT"] = settings.ResolvedFit,
             ["REO_DISPLAY_FILTER"] = settings.LinearFilter ? "linear" : "nearest",
             ["REO_WINDOW_WIDTH"] = Number(size.Width),
