@@ -2560,15 +2560,58 @@ uint16_t modernCameraInventoryStep(int current, int target) {
 // File #1 menus with mouse hover. Inventory grid: 0x755EC4 == 1. Item submenu:
 // 0x755EC4 == 1 and 0x755EC1 == 2, option index at 0x755E62. Pause: 0x755EC4 == 4,
 // option index at 0x755EC1 (0 TYPE .. 10 EXIT).
-enum ModernCameraMenuKind { MenuNone, MenuGrid, MenuList };
+enum ModernCameraMenuKind { MenuNone, MenuGrid, MenuList, MenuCarousel };
 struct ModernCameraMenu {
     ModernCameraMenuKind kind = MenuNone;
     int current = -1;
 };
 
+// Bank-aware guest reads (overlay/frontend memory is read through the runtime's
+// bank view, as the automated test route does).
+uint32_t modernCameraWord(const uint8_t* ram, uint32_t address) {
+    uint32_t value = 0;
+    if (address >= 0x100000u && address + 4u <= 0x2000000u)
+        reo_source_instrumentation::copyBytesForBank(ram, &value, ram + address, 4);
+    return value;
+}
+uint8_t modernCameraByte(const uint8_t* ram, uint32_t address) {
+    return address < 0x2000000u ? uint8_t(reo_source_instrumentation::bankRead(ram, ram + address)) : 0;
+}
+bool modernCameraPointer(uint32_t address, uint32_t bytes) {
+    return address >= 0x100000u && address + bytes <= 0x2000000u;
+}
+
+// Frontend (outside rooms). The menu object at *frontMenu (File #1 0x5D4898) holds its state at +0
+// (0x0501 main menu, 0x0202 single-play submenu), the option at +0x0C and a
+// transition word at +0x64. Character select: *0x32442C state 0x0109 at +4,
+// ready when +0x20 is zero; its roster scrolls so the selection stays in the
+// third of eight visible places.
+ModernCameraMenu modernCameraFrontendState(const uint8_t* ram, int& screen) {
+    screen = 0;
+    const uint32_t front = modernCameraWord(ram, reo_network::game::frontMenu);
+    if (modernCameraPointer(front, 0x74u) && modernCameraWord(ram, front + 0x64u) == 0) {
+        const uint32_t state = modernCameraWord(ram, front) & 0xffffu;
+        if (state == 0x0501u || state == 0x0202u) {
+            screen = state == 0x0501u ? 1 : 2;
+            return {MenuList, int(modernCameraByte(ram, front + 0x0cu))};
+        }
+    }
+    const uint32_t selection = modernCameraWord(ram, 0x32442cu);
+    if (modernCameraPointer(selection, 0x24u) && (modernCameraWord(ram, selection + 4u) & 0xffffu) == 0x0109u &&
+        modernCameraWord(ram, selection + 0x20u) == 0) {
+        screen = 3;
+        return {MenuCarousel, 2};
+    }
+    return {};
+}
+
 ModernCameraMenu modernCameraMenuState(const uint8_t* ram) {
-    if (!ram || ram[0x4badd0u] != 2u)
+    if (!ram)
         return {};
+    if (ram[0x4badd0u] != 2u) {
+        int screen = 0;
+        return modernCameraFrontendState(ram, screen);
+    }
     const uint8_t screen = ram[0x755ec4u];
     if (screen == 1u && ram[0x755ec1u] == 2u)
         return {MenuList, int(ram[0x755e62u])};
@@ -2582,6 +2625,21 @@ ModernCameraMenu modernCameraMenuState(const uint8_t* ram) {
 int modernCameraMenuHoverAt(const uint8_t* ram, const ModernCameraMenu& menu, float gx, float gy) {
     if (menu.kind == MenuGrid)
         return modernCameraInventoryEntryAt(gx, gy);
+    if (ram[0x4badd0u] != 2u) {
+        int screen = 0;
+        modernCameraFrontendState(ram, screen);
+        if (screen == 1 && gx >= 220.0f && gx <= 420.0f && gy >= 253.0f && gy < 253.0f + 6 * 24.0f)
+            return int((gy - 253.0f) / 24.0f); // main menu: 6 options, 24 lines apart
+        if (screen == 2 && gx >= 240.0f && gx <= 400.0f && gy >= 277.0f && gy < 277.0f + 2 * 24.0f)
+            return int((gy - 277.0f) / 24.0f); // single-play submenu
+        if (screen == 3 && gy >= 100.0f && gy <= 240.0f) {
+            static const float places[8] = {68, 140, 210, 284, 355, 427, 502, 572};
+            for (int place = 0; place < 8; ++place)
+                if (std::fabs(gx - places[place]) <= 34.0f)
+                    return place;
+        }
+        return -1;
+    }
     if (ram[0x755ec4u] == 1u) {
         // Item submenu of a local slot: 24-line boxes left of the local panel.
         const int entry = modernCameraInventoryCurrent(ram);
@@ -2674,7 +2732,9 @@ uint16_t modernCameraKeys(const uint8_t* ram, double clock) {
     static bool wasFocused = false;
     if (!reo::modern_camera::active())
         return 0;
-    const bool focused = modernCameraFocusedWindow() != nullptr;
+    // The automated-test cursor works without focus, so test windows never need
+    // to take keyboard focus from the user.
+    const bool focused = modernCameraFocusedWindow() != nullptr || testCursor.active();
     const auto now = std::chrono::steady_clock::now();
     if (focused && !wasFocused)
         focusedSince = now;
@@ -2734,6 +2794,25 @@ uint16_t modernCameraKeys(const uint8_t* ram, double clock) {
                                 : GetCursorPos(&cursor) && modernCameraGamePoint(cursor, gx, gy))
             hover = modernCameraMenuHoverAt(ram, menu, gx, gy);
     }
+    static const bool menuLog = [] {
+        const char* value = std::getenv("REO_MODERN_CAMERA_MENU_LOG");
+        return value && std::strcmp(value, "1") == 0;
+    }();
+    if (menuLog) {
+        static int lastKey = -1;
+        static unsigned ticks = 0;
+        const int key = (++ticks % 120 == 0) ? -2 - int(ticks) : int(menu.kind) * 1000000 + (current + 1) * 1000 + (hover + 1) + (idle ? 0 : 500);
+        if (key != lastKey) {
+            lastKey = key;
+            const uint32_t front = modernCameraWord(ram, reo_network::game::frontMenu);
+            std::fprintf(stderr,
+                         "[MODCAM-MENU] t=%.2f kind=%d current=%d hover=%d arrow=%d idle=%d gs=%u front=%08x "
+                         "fstate=%08x busy=%08x sel=%08x\n",
+                         clock, int(menu.kind), current, hover, int(arrow), int(idle), ram ? ram[0x4badd0u] : 0u,
+                         front, modernCameraWord(ram, front), modernCameraWord(ram, front + 0x64u),
+                         modernCameraWord(ram, 0x32442cu));
+        }
+    }
     // Navigate only when the option under the mouse changes (or on a click), so a
     // resting mouse never fights keyboard/controller navigation.
     static int pendingClick = -1, lastHover = -1, hoverTarget = -1;
@@ -2750,7 +2829,34 @@ uint16_t modernCameraKeys(const uint8_t* ram, double clock) {
         hoverTarget = -1;
     if (click && hover >= 0 && hover != current)
         pendingClick = hover;
-    if (idle && inMenu && arrow) {
+    // Character carousel: clicking another character rotates the roster to bring
+    // it into the selection; clicking the selected character confirms. Hovering
+    // alone does not rotate (the roster would move under the mouse).
+    static int carouselSteps = 0;
+    static bool carouselConfirm = false;
+    if (menu.kind == MenuCarousel) {
+        hoverTarget = -1;
+        if (click && hover >= 0) {
+            carouselSteps = hover - 2;
+            carouselConfirm = hover == 2;
+        }
+        if (idle && arrow && gapTicks == 0) {
+            if (carouselSteps) {
+                pulse(carouselSteps > 0 ? reo::PS2_RIGHT : reo::PS2_LEFT);
+                carouselSteps += carouselSteps > 0 ? -1 : 1;
+            } else if (carouselConfirm) {
+                carouselConfirm = false;
+                pulse(reo::PS2_CROSS);
+            }
+        }
+        pendingClick = -1;
+    } else if (menu.kind != MenuNone || ram[0x4badd0u] == 2u) {
+        // Another screen: drop pending rotation. (The carousel briefly reports no
+        // menu while it animates; pending steps survive that.)
+        carouselSteps = 0;
+        carouselConfirm = false;
+    }
+    if (idle && inMenu && arrow && menu.kind != MenuCarousel) {
         const int target = pendingClick >= 0 ? pendingClick : hoverTarget;
         if (target >= 0 && target == current && pendingClick >= 0) {
             pendingClick = -1;
@@ -2792,7 +2898,8 @@ uint16_t modernCameraKeys(const uint8_t* ram, double clock) {
     const bool inventory = inMenu || tabHover >= 0; // a click elsewhere in a supported menu still confirms
     if (arrow) {
         // Plain clicks confirm/go back (submenus, other screens, the current slot).
-        if (lmb && !(inventory && hover >= 0 && hover != current) && pendingClick < 0 && tabHover < 0)
+        if (lmb && !(inventory && hover >= 0 && hover != current) && pendingClick < 0 && tabHover < 0 &&
+            !(menu.kind == MenuCarousel && hover >= 0))
             buttons |= reo::PS2_CROSS;
         if (down(VK_RBUTTON))
             buttons |= reo::PS2_CIRCLE;
@@ -2833,7 +2940,12 @@ void pad2FeederLoop() {
             pressed |= pad2AutomaticAccount(routeRam, now);
             // Live input (runtime/input: keyboard and XInput, same bit order), only while this
             // process owns the foreground window so typing elsewhere does not press buttons.
-            if (ReoHwBridge* br = ReoHwBridge::instance()) {
+            // REO_TEST_NO_HOST_INPUT=1 ignores real input in automated test windows.
+            static const bool hostInput = [] {
+                const char* value = std::getenv("REO_TEST_NO_HOST_INPUT");
+                return !(value && std::strcmp(value, "1") == 0);
+            }();
+            if (ReoHwBridge* br = hostInput ? ReoHwBridge::instance() : nullptr) {
                 if (reo::Input* in = br->input()) {
                     bool focused = true;
 #ifdef _WIN32

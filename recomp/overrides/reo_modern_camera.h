@@ -382,13 +382,24 @@ inline void cameraApply(uint8_t* ram, R5900Context* ctx, PS2Runtime* runtime) {
 // all 32 MiB of guest RAM to modcam_ram_<n>.bin and log the elapsed time
 // (menu reverse engineering; RAM dumps stay in the private run folder).
 inline void snapshotRam(const uint8_t* ram) {
-    static const bool on = [] {
+    // Level 4: any game state, from REO_MODERN_CAMERA_SNAP_AFTER seconds (frontend menus).
+    static const int level = [] {
         const char* value = std::getenv("REO_MODERN_CAMERA_PROBE");
-        return value && std::strcmp(value, "3") == 0;
+        return value ? std::atoi(value) : 0;
+    }();
+    static const double after = [] {
+        const char* value = std::getenv("REO_MODERN_CAMERA_SNAP_AFTER");
+        return value ? std::atof(value) : 0.0;
     }();
     static unsigned calls = 0, index = 0;
     static const auto start = std::chrono::steady_clock::now();
-    if (!on || ram[game.gameState] != 2u || freeGameplay(ram) || ++calls % 40 != 0 || index >= 30)
+    if (level != 3 && level != 4)
+        return;
+    if (level == 3 && (ram[game.gameState] != 2u || freeGameplay(ram)))
+        return;
+    if (level == 4 && std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() < after)
+        return;
+    if (++calls % 40 != 0 || index >= 30)
         return;
     char name[64];
     std::snprintf(name, sizeof(name), "modcam_ram_%03u.bin", index);
@@ -438,7 +449,8 @@ inline void service(uint8_t* ram, R5900Context* ctx, PS2Runtime* runtime) {
 
 inline void install(PS2Runtime& runtime, Addresses addresses = File1) {
     if (const char* level = std::getenv("REO_MODERN_CAMERA_PROBE"))
-        probe = std::strcmp(level, "1") == 0 || std::strcmp(level, "2") == 0 || std::strcmp(level, "3") == 0;
+        probe = std::strcmp(level, "1") == 0 || std::strcmp(level, "2") == 0 || std::strcmp(level, "3") == 0 ||
+                std::strcmp(level, "4") == 0;
     enabled = flag("REO_MODERN_CAMERA");
     if (!probe && !enabled)
         return;
