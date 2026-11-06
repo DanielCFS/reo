@@ -2524,7 +2524,7 @@ int modernCameraInventoryCurrent(const uint8_t* ram) {
 // a left-column slot moves to the next panel in a cycle (local -> partners ->
 // local), so a different panel is reached by pressing LEFT; inside a panel the
 // column and row are adjusted, and the local weapon sits below its slots.
-// Gives up after 12 presses for one target (e.g. an absent partner panel).
+// Gives up after 16 presses for one target (e.g. an absent partner panel).
 uint16_t modernCameraInventoryStep(int current, int target) {
     static int lastTarget = -1, lastCurrent = -1, presses = 0;
     static uint16_t lastStep = 0;
@@ -2535,7 +2535,7 @@ uint16_t modernCameraInventoryStep(int current, int target) {
     }
     const bool stalled = lastStep && current == lastCurrent;
     lastCurrent = current;
-    if (++presses > 12)
+    if (++presses > 16)
         return lastStep = 0;
     auto panelOf = [](int entry) { return entry == 49 ? 0 : entry / 12; };
     if (panelOf(current) != panelOf(target)) {
@@ -2555,6 +2555,69 @@ uint16_t modernCameraInventoryStep(int current, int target) {
     if ((slot >> 1) != (goal >> 1))
         return lastStep = (goal >> 1) ? reo::PS2_DOWN : reo::PS2_UP;
     return lastStep = 0;
+}
+
+// File #1 menus with mouse hover. Inventory grid: 0x755EC4 == 1. Item submenu:
+// 0x755EC4 == 1 and 0x755EC1 == 2, option index at 0x755E62. Pause: 0x755EC4 == 4,
+// option index at 0x755EC1 (0 TYPE .. 10 EXIT).
+enum ModernCameraMenuKind { MenuNone, MenuGrid, MenuList };
+struct ModernCameraMenu {
+    ModernCameraMenuKind kind = MenuNone;
+    int current = -1;
+};
+
+ModernCameraMenu modernCameraMenuState(const uint8_t* ram) {
+    if (!ram || ram[0x4badd0u] != 2u)
+        return {};
+    const uint8_t screen = ram[0x755ec4u];
+    if (screen == 1u && ram[0x755ec1u] == 2u)
+        return {MenuList, int(ram[0x755e62u])};
+    if (screen == 1u && ram[0x759c9eu] == 0u) // ITEM tab
+        return {MenuGrid, modernCameraInventoryCurrent(ram)};
+    if (screen == 4u)
+        return {MenuList, int(ram[0x755ec1u])};
+    return {};
+}
+
+int modernCameraMenuHoverAt(const uint8_t* ram, const ModernCameraMenu& menu, float gx, float gy) {
+    if (menu.kind == MenuGrid)
+        return modernCameraInventoryEntryAt(gx, gy);
+    if (ram[0x755ec4u] == 1u) {
+        // Item submenu of a local slot: 24-line boxes left of the local panel.
+        const int entry = modernCameraInventoryCurrent(ram);
+        const bool local = entry == 49 || (entry >= 0 && entry < 12);
+        if (local && gx >= 395.0f && gx <= 510.0f && gy >= 96.0f && gy < 96.0f + 8 * 24.0f)
+            return int((gy - 96.0f) / 24.0f);
+        return -1;
+    }
+    // Pause: 20-line rows; a section header belongs to its first option.
+    static const struct {
+        float top, bottom;
+        int index;
+    } rows[] = {{60, 160, 0},  {160, 180, 1}, {180, 220, 2}, {220, 240, 3}, {240, 260, 4}, {260, 300, 5},
+                {300, 340, 6}, {340, 360, 7}, {360, 380, 8}, {380, 400, 9}, {400, 420, 10}};
+    if (gx < 140.0f || gx > 530.0f)
+        return -1;
+    for (const auto& row : rows)
+        if (gy >= row.top && gy < row.bottom)
+            return row.index;
+    return -1;
+}
+
+// Vertical list: step toward the target index. Menus ignore presses while their
+// cursor animates, so give up only after 4 presses in a row without effect.
+uint16_t modernCameraListStep(int current, int target) {
+    static int lastTarget = -1, lastCurrent = -1, stalls = 0;
+    if (target != lastTarget) {
+        lastTarget = target;
+        stalls = 0;
+    } else {
+        stalls = current == lastCurrent ? stalls + 1 : 0;
+    }
+    lastCurrent = current;
+    if (stalls > 4)
+        return 0;
+    return target > current ? reo::PS2_DOWN : target < current ? reo::PS2_UP : 0;
 }
 
 // Automated menu tests: REO_TEST_MENU_CURSOR="sec:x,y;..." places a virtual cursor
@@ -2642,7 +2705,7 @@ uint16_t modernCameraKeys(const uint8_t* ram, double clock) {
     if (pulseTicks > 0) {
         buttons |= pulseButton;
         if (--pulseTicks == 0)
-            gapTicks = 3;
+            gapTicks = 4;
     } else if (gapTicks > 0) {
         --gapTicks;
     }
@@ -2657,24 +2720,29 @@ uint16_t modernCameraKeys(const uint8_t* ram, double clock) {
     const bool click = lmb && !lmbWas;
     lmbWas = lmb;
 
-    // Inventory (0x755EC4 == 1 in a room): hovering a slot walks the game's own
-    // cursor there; clicking a slot selects it first, then confirms.
-    int hover = -1, current = -1;
-    const bool inventory = ram && ram[0x4badd0u] == 2u && ram[0x755ec4u] == 1u;
-    if (inventory && arrow) {
+    // Supported menus (inventory grid, item submenu, pause list): hovering an
+    // option walks the game's own cursor there; clicking an option selects it
+    // first, then confirms.
+    int hover = -1;
+    const ModernCameraMenu menu = modernCameraMenuState(ram);
+    const int current = menu.current;
+    const bool inMenu = menu.kind != MenuNone && current >= 0;
+    if (inMenu && arrow) {
         POINT cursor{};
         float gx = 0, gy = 0;
         if (testCursor.active() ? testCursor.at(clock, gx, gy)
                                 : GetCursorPos(&cursor) && modernCameraGamePoint(cursor, gx, gy))
-            hover = modernCameraInventoryEntryAt(gx, gy);
-        current = modernCameraInventoryCurrent(ram);
+            hover = modernCameraMenuHoverAt(ram, menu, gx, gy);
     }
-    // Navigate only when the slot under the mouse changes (or on a click), so a
+    // Navigate only when the option under the mouse changes (or on a click), so a
     // resting mouse never fights keyboard/controller navigation.
     static int pendingClick = -1, lastHover = -1, hoverTarget = -1;
-    if (!inventory || !arrow) {
+    static ModernCameraMenuKind lastKind = MenuNone;
+    if (!inMenu || !arrow || menu.kind != lastKind) {
         pendingClick = hoverTarget = lastHover = -1;
-    } else if (hover != lastHover) {
+        lastKind = inMenu && arrow ? menu.kind : MenuNone;
+    }
+    if (inMenu && arrow && hover != lastHover) {
         lastHover = hover;
         hoverTarget = hover;
     }
@@ -2682,21 +2750,49 @@ uint16_t modernCameraKeys(const uint8_t* ram, double clock) {
         hoverTarget = -1;
     if (click && hover >= 0 && hover != current)
         pendingClick = hover;
-    if (idle && inventory && arrow && current >= 0) {
+    if (idle && inMenu && arrow) {
         const int target = pendingClick >= 0 ? pendingClick : hoverTarget;
         if (target >= 0 && target == current && pendingClick >= 0) {
             pendingClick = -1;
             pulse(reo::PS2_CROSS);
         } else if (target >= 0 && target != current) {
-            if (uint16_t step = modernCameraInventoryStep(current, target))
+            const uint16_t step = menu.kind == MenuGrid ? modernCameraInventoryStep(current, target)
+                                                        : modernCameraListStep(current, target);
+            if (step)
                 pulse(step);
             else
                 pendingClick = hoverTarget = -1;
         }
     }
+    // Inventory tabs (ITEM/SPECIAL/FILE, index at 0x759C9E): clicking a tab label
+    // switches to it with R1/L1.
+    static int tabTarget = -1;
+    int tabHover = -1;
+    const bool tabs = ram && ram[0x4badd0u] == 2u && ram[0x755ec4u] == 1u && ram[0x755ec1u] != 2u &&
+                      ram[0x759c9eu] <= 2u;
+    if (tabs && arrow) {
+        POINT cursor{};
+        float gx = 0, gy = 0;
+        if ((testCursor.active() ? testCursor.at(clock, gx, gy)
+                                 : GetCursorPos(&cursor) && modernCameraGamePoint(cursor, gx, gy)) &&
+            gy >= 25.0f && gy <= 50.0f)
+            tabHover = gx >= 206.0f && gx < 280.0f ? 0 : gx >= 288.0f && gx < 356.0f ? 1 : gx >= 363.0f && gx < 438.0f ? 2 : -1;
+        if (click && tabHover >= 0)
+            tabTarget = tabHover;
+    } else {
+        tabTarget = -1;
+    }
+    if (tabTarget >= 0 && idle && tabs) {
+        const int tab = ram[0x759c9eu];
+        if (tab == tabTarget)
+            tabTarget = -1;
+        else
+            pulse(tabTarget > tab ? reo::PS2_R1 : reo::PS2_L1);
+    }
+    const bool inventory = inMenu || tabHover >= 0; // a click elsewhere in a supported menu still confirms
     if (arrow) {
         // Plain clicks confirm/go back (submenus, other screens, the current slot).
-        if (lmb && !(inventory && hover >= 0 && hover != current) && pendingClick < 0)
+        if (lmb && !(inventory && hover >= 0 && hover != current) && pendingClick < 0 && tabHover < 0)
             buttons |= reo::PS2_CROSS;
         if (down(VK_RBUTTON))
             buttons |= reo::PS2_CIRCLE;
