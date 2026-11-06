@@ -47,8 +47,19 @@ public static class DiscImport {
                         string? expected = null) =>
         m is { Version : 1 } && m.Game == game.Id
         && string.Equals(m.Source, source, StringComparison.OrdinalIgnoreCase) &&
-        m.SourceLength == file.Length && m.SourceWriteTicks == file.LastWriteTimeUtc.Ticks &&
+        m.SourceLength == file.Length &&
+        (m.SourceWriteTicks == file.LastWriteTimeUtc.Ticks || Bundled(source)) &&
         (expected == null || m.ElfSha256 == expected);
+    // A portable installation may ship its ISO inside its own data folder. Archives keep
+    // file times only to 2 s in local time, so after extraction on another PC the time
+    // differs; length and the executable hash still identify the disc.
+    static bool Bundled(string source) {
+        try {
+            return Storage.Within(source, Settings.Home);
+        } catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException) {
+            return false;
+        }
+    }
     public static bool Ready(Settings settings, string? gameId = null) {
         if (settings.UsesGamePak(gameId)) return GamePaks.Ready(settings, gameId);
         try {
