@@ -2303,40 +2303,96 @@ bool pad2TestInteractQuit(uint8_t* rd, double now, reo::DualShock2State& pad, ui
     return true;
 }
 
-// Modern camera mouse look. During free gameplay with the game focused, the
-// cursor is hidden, confined to the game window and re-centred every feeder tick;
-// its movement turns the camera. Menus, cutscenes and other windows release it.
+// Modern camera mouse (PC controls), with the game focused:
+// - free gameplay: the cursor is hidden, confined to the game window and re-centred
+//   every feeder tick; its movement turns the camera;
+// - menus, inventory and other screens: an arrow cursor is shown (also in
+//   borderless fullscreen) and hidden again after 3 s without movement; the left
+//   button confirms (Cross), the right button goes back (Circle) and the wheel
+//   steps up/down. Other windows release the cursor.
 #ifdef _WIN32
 namespace {
-std::atomic<bool> g_cameraCursorHidden{false};
-WNDPROC g_cameraPreviousProc = nullptr;
-HWND g_cameraSubclassed = nullptr;
+enum CameraCursorMode { CursorUntouched = 0, CursorHidden = 1, CursorArrow = 2 };
+std::atomic<int> g_cameraCursorMode{CursorUntouched};
+std::atomic<bool> g_cameraCursorHidden{false}; // mouse-look capture active
+std::atomic<int> g_cameraWheel{0};             // accumulated WHEEL_DELTA units
+struct CameraSubclass {
+    HWND hwnd = nullptr;
+    WNDPROC previous = nullptr;
+};
+CameraSubclass g_cameraChild, g_cameraTop;
 
-LRESULT CALLBACK modernCameraCursorProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
-    if (message == WM_SETCURSOR && LOWORD(lParam) == HTCLIENT && g_cameraCursorHidden.load()) {
-        SetCursor(nullptr);
-        return TRUE;
+LRESULT CALLBACK modernCameraWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    const WNDPROC previous = hwnd == g_cameraChild.hwnd ? g_cameraChild.previous : g_cameraTop.previous;
+    if (message == WM_SETCURSOR && LOWORD(lParam) == HTCLIENT) {
+        const int mode = g_cameraCursorMode.load();
+        if (mode == CursorHidden) {
+            SetCursor(nullptr);
+            return TRUE;
+        }
+        if (mode == CursorArrow) {
+            SetCursor(LoadCursorW(nullptr, MAKEINTRESOURCEW(32512)));
+            return TRUE;
+        }
     }
-    return CallWindowProcW(g_cameraPreviousProc, hwnd, message, wParam, lParam);
+    if (message == WM_MOUSEWHEEL && g_cameraCursorMode.load() != CursorUntouched) {
+        g_cameraWheel.fetch_add(GET_WHEEL_DELTA_WPARAM(wParam));
+        return 0;
+    }
+    return CallWindowProcW(previous, hwnd, message, wParam, lParam);
 }
-} // namespace
 
-void modernCameraMouse(const uint8_t* ram) {
+void modernCameraSubclass(CameraSubclass& slot, HWND hwnd) {
+    if (!hwnd || slot.hwnd)
+        return;
+    slot.previous = reinterpret_cast<WNDPROC>(
+        SetWindowLongPtrW(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(modernCameraWindowProc)));
+    if (slot.previous)
+        slot.hwnd = hwnd;
+}
+
+// Apply a cursor mode now: WM_SETCURSOR runs on the window thread.
+void modernCameraCursor(int mode) {
+    if (g_cameraCursorMode.exchange(mode) == mode)
+        return;
+    for (HWND hwnd : {g_cameraChild.hwnd, g_cameraTop.hwnd})
+        if (hwnd)
+            PostMessageW(hwnd, WM_SETCURSOR, reinterpret_cast<WPARAM>(hwnd), MAKELPARAM(HTCLIENT, WM_MOUSEMOVE));
+}
+
+// REO_MODERN_CAMERA_MOUSE=0 disables the mouse; "menus" keeps it out of gameplay.
+bool modernCameraMouseEnabled() {
     static const bool enabled = [] {
         const char* value = std::getenv("REO_MODERN_CAMERA_MOUSE");
         return reo::modern_camera::active() && !(value && std::strcmp(value, "0") == 0);
     }();
-    if (!enabled)
-        return;
+    return enabled;
+}
+bool modernCameraMouseLook() {
+    static const bool look = [] {
+        const char* value = std::getenv("REO_MODERN_CAMERA_MOUSE");
+        return !(value && std::strcmp(value, "menus") == 0);
+    }();
+    return look;
+}
+
+HWND modernCameraFocusedWindow() {
     HWND top = GetForegroundWindow();
     DWORD pid = 0;
     if (top)
         GetWindowThreadProcessId(top, &pid);
-    const bool capture = top && pid == GetCurrentProcessId() && !IsIconic(top) &&
-                         reo::modern_camera::freeGameplay(ram);
-    if (!capture) {
+    return top && pid == GetCurrentProcessId() && !IsIconic(top) ? top : nullptr;
+}
+} // namespace
+
+void modernCameraMouse(const uint8_t* ram) {
+    if (!modernCameraMouseEnabled())
+        return;
+    HWND top = modernCameraFocusedWindow();
+    if (!top) {
         if (g_cameraCursorHidden.exchange(false))
             ClipCursor(nullptr);
+        modernCameraCursor(CursorUntouched);
         return;
     }
     RECT client{};
@@ -2347,17 +2403,33 @@ void modernCameraMouse(const uint8_t* ram) {
     ClientToScreen(top, &centre);
     ClientToScreen(top, &topLeft);
     ClientToScreen(top, &bottomRight);
-    // The presentation child under the centre receives WM_SETCURSOR first.
-    HWND child = WindowFromPoint(centre);
-    DWORD childPid = 0;
-    if (child)
-        GetWindowThreadProcessId(child, &childPid);
-    if (child && childPid == GetCurrentProcessId() && child != g_cameraSubclassed && !g_cameraSubclassed) {
-        g_cameraPreviousProc = reinterpret_cast<WNDPROC>(
-            SetWindowLongPtrW(child, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(modernCameraCursorProc)));
-        if (g_cameraPreviousProc)
-            g_cameraSubclassed = child;
+    // The presentation child under the centre receives WM_SETCURSOR first; the
+    // top-level window receives the wheel.
+    modernCameraSubclass(g_cameraTop, top);
+    if (HWND child = WindowFromPoint(centre); child && child != top && GetAncestor(child, GA_ROOT) == top)
+        modernCameraSubclass(g_cameraChild, child);
+    if (!reo::modern_camera::freeGameplay(ram)) {
+        if (g_cameraCursorHidden.exchange(false))
+            ClipCursor(nullptr);
+        static POINT last{};
+        static auto moved = std::chrono::steady_clock::now();
+        const auto now = std::chrono::steady_clock::now();
+        POINT cursor{};
+        if (GetCursorPos(&cursor) && (cursor.x != last.x || cursor.y != last.y)) {
+            last = cursor;
+            moved = now;
+        }
+        modernCameraCursor(now - moved < std::chrono::seconds(3) ? CursorArrow : CursorHidden);
+        return;
     }
+    g_cameraWheel.store(0);
+    if (!modernCameraMouseLook()) {
+        if (g_cameraCursorHidden.exchange(false))
+            ClipCursor(nullptr);
+        modernCameraCursor(CursorUntouched);
+        return;
+    }
+    modernCameraCursor(CursorHidden);
     if (!g_cameraCursorHidden.exchange(true)) {
         // Start of capture: no delta, just centre the cursor.
         RECT clip{topLeft.x, topLeft.y, bottomRight.x, bottomRight.y};
@@ -2374,29 +2446,63 @@ void modernCameraMouse(const uint8_t* ram) {
         SetCursorPos(centre.x, centre.y);
     }
 }
-// PC controls in the style of modern remakes, during free gameplay with the game
-// focused: right mouse button aims (R1), left mouse button fires/interacts (Cross)
-// and Shift runs. Running is resolved through the game's own control-type table,
-// so it follows whichever face button the selected controller type assigns.
+
+// PC controls in the style of modern remakes, with the game focused. Free
+// gameplay: right mouse button aims (R1), left mouse button fires/interacts
+// (Cross) and Shift runs; running is resolved through the game's own
+// control-type table, so it follows the selected controller type. Menus: left
+// button confirms (Cross), right button goes back (Circle), the wheel steps
+// up/down with short presses the game registers one by one. A click that only
+// focuses the window is ignored.
 uint16_t modernCameraKeys(const uint8_t* ram) {
-    if (!reo::modern_camera::active() || !reo::modern_camera::freeGameplay(ram))
+    static auto focusedSince = std::chrono::steady_clock::now();
+    static bool wasFocused = false;
+    if (!reo::modern_camera::active())
         return 0;
-    HWND top = GetForegroundWindow();
-    DWORD pid = 0;
-    if (top)
-        GetWindowThreadProcessId(top, &pid);
-    if (!top || pid != GetCurrentProcessId())
+    const bool focused = modernCameraFocusedWindow() != nullptr;
+    const auto now = std::chrono::steady_clock::now();
+    if (focused && !wasFocused)
+        focusedSince = now;
+    wasFocused = focused;
+    if (!focused)
         return 0;
     auto down = [](int key) { return (GetAsyncKeyState(key) & 0x8000) != 0; };
     uint16_t buttons = 0;
-    if (g_cameraCursorHidden.load()) {
-        if (down(VK_RBUTTON))
-            buttons |= reo::PS2_R1;
+    const bool settled = now - focusedSince > std::chrono::milliseconds(300);
+    if (reo::modern_camera::freeGameplay(ram)) {
+        if (g_cameraCursorHidden.load() && settled) {
+            if (down(VK_RBUTTON))
+                buttons |= reo::PS2_R1;
+            if (down(VK_LBUTTON))
+                buttons |= reo::PS2_CROSS;
+        }
+        if (down(VK_SHIFT))
+            buttons |= pad2TestActorAction(ram, 0x10u);
+        return buttons;
+    }
+    if (!modernCameraMouseEnabled())
+        return 0;
+    if (settled && g_cameraCursorMode.load() == CursorArrow) {
         if (down(VK_LBUTTON))
             buttons |= reo::PS2_CROSS;
+        if (down(VK_RBUTTON))
+            buttons |= reo::PS2_CIRCLE;
     }
-    if (down(VK_SHIFT))
-        buttons |= pad2TestActorAction(ram, 0x10u);
+    // Wheel: one D-pad press per notch (3 ticks down, 2 ticks released).
+    static int pulseTicks = 0, gapTicks = 0;
+    static uint16_t pulseButton = 0;
+    if (pulseTicks > 0) {
+        buttons |= pulseButton;
+        if (--pulseTicks == 0)
+            gapTicks = 2;
+    } else if (gapTicks > 0) {
+        --gapTicks;
+    } else if (const int wheel = g_cameraWheel.load(); wheel >= WHEEL_DELTA || wheel <= -WHEEL_DELTA) {
+        g_cameraWheel.fetch_sub(wheel > 0 ? WHEEL_DELTA : -WHEEL_DELTA);
+        pulseButton = wheel > 0 ? reo::PS2_UP : reo::PS2_DOWN;
+        pulseTicks = 3;
+        buttons |= pulseButton;
+    }
     return buttons;
 }
 #else
