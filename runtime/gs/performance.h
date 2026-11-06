@@ -5,6 +5,12 @@
 #include <cstdlib>
 #include <cstring>
 
+namespace reo::overlay {
+// Aiming reticle drawn by the presenter (modern camera). 0 hides it; bit 0 shows
+// it and bits 8..15 hold its spread (255 = widest, shrinking while aim settles).
+inline std::atomic<uint32_t> crosshair{0};
+} // namespace reo::overlay
+
 namespace reo::performance {
 inline bool enabled() {
     static const bool value = [] {

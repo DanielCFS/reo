@@ -39,6 +39,7 @@ class ResidentDxgiPresenter {
     struct Parameters {
         uint32_t sourceWidth, sourceHeight, destinationWidth, destinationHeight, linear;
         uint32_t fps = 0, frameMs = 0, ups = 0;
+        uint32_t crosshair = 0;
     };
     static uint32_t layoutFlags() {
         const char* aspect = std::getenv("REO_DISPLAY_ASPECT");
@@ -276,6 +277,7 @@ class ResidentDxgiPresenter {
                 std::fprintf(stderr, "[PERFORMANCE-OVERLAY] fps=%.1f frame_ms=%.1f ups=%.1f\n",
                     reading.fps / 10.0, reading.frameMs / 10.0, reading.ups / 10.0);
         }
+        parameters.crosshair = reo::overlay::crosshair.load(std::memory_order_relaxed);
         cmd->push_constants(&parameters, 0, sizeof(parameters));
         cmd->draw(3);
         cmd->end_render_pass();

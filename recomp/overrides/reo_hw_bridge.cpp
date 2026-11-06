@@ -2464,9 +2464,9 @@ void pad2FeederLoop() {
             }
             // Modern camera: right stick/mouse orbit the camera (L2 keeps fixed chat),
             // D-pad walks camera-relative, plus PC mouse buttons and Shift to run.
+            pressed |= modernCameraKeys(routeRam);
             reo::modern_camera::filterPad(routeRam, hostPad, pressed);
             modernCameraMouse(routeRam);
-            pressed |= modernCameraKeys(routeRam);
             g_pad2.lastPressed = pressed;
             const uint16_t data = (uint16_t)~pressed; // active-low
             // Keep digital directions independent from the analog sticks. Both

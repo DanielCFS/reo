@@ -1,6 +1,7 @@
 #pragma once
 #include "ps2_runtime.h"
 #include "runtime/input/input.h"
+#include "runtime/gs/performance.h"
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -72,7 +73,13 @@ inline Rig rig;
 // Aiming (R1 held) blends to a tighter over-the-shoulder view, as in modern
 // remakes; the character then faces where the camera looks.
 inline Rig aimRig{95.0f, 160.0f, 50.0f, 600.0f, 140.0f, 40.0f, 0.0f};
-inline constexpr float kAimBlendSeconds = 0.18f;
+inline constexpr float kAimBlendSeconds = 0.10f;
+// While aiming, camera pitch beyond these angles aims high/low with the game's
+// own up/down aim (digital up/down while the weapon is readied).
+inline constexpr float kAimUpPitch = -10.0f, kAimDownPitch = 12.0f;
+// Movement facing turns toward camera + stick direction at this rate; the game
+// itself keeps a run's direction while the input stays the same.
+inline constexpr float kTurnDegPerSec = 720.0f;
 inline float aimBlend = 0.0f; // 0 = normal rig, 1 = aim rig
 
 // Orbit input. REO_MODERN_CAMERA_CONTROLS overrides
@@ -89,6 +96,10 @@ inline constexpr float kPitchMin = -35.0f, kPitchMax = 50.0f; // degrees; positi
 // Written by the pad feeder thread, consumed on the guest thread.
 inline std::atomic<float> stickX{0.0f}, stickY{0.0f}; // -1..1, right/down positive
 inline std::atomic<int> mouseDx{0}, mouseDy{0};       // accumulated pixels
+inline std::atomic<float> moveX{0.0f}, moveY{0.0f};   // left stick as sent, -1..1
+inline std::atomic<bool> aimHeld{false};               // R1 held in free gameplay
+// Written on the guest thread, read by the feeder for vertical aim.
+inline std::atomic<float> aimPitch{0.0f};              // degrees
 
 inline float yaw = 0.0f, pitch = 0.0f; // radians
 inline bool haveYaw = false;
@@ -115,11 +126,12 @@ inline bool active() {
     return on;
 }
 
-// Free room control: no loading, door, cutscene, message or menu (the same guards
-// the automated walk uses before steering).
+// Free room control: no loading, door, cutscene, message or menu. 0x4BAE07 is
+// deliberately not checked: it keeps a scenario event value (3 after the J's Bar
+// door cutscene) for the rest of the room, which would disable PC controls.
 inline bool freeGameplay(const uint8_t* ram) {
     return ram && ram[game.gameState] == 2u && ram[0x4badeeu] == 0 && ram[0x755ec4u] == 0 &&
-           ram[0x4badf8u] == 0 && ram[0x4bae8du] == 0 && ram[game.localSlot] < 4u && ram[0x4bae07u] == 0;
+           ram[0x4badf8u] == 0 && ram[0x4bae8du] == 0 && ram[game.localSlot] < 4u;
 }
 
 inline uint32_t localActor(const uint8_t* ram) {
@@ -142,6 +154,8 @@ inline void filterPad(const uint8_t* ram, reo::DualShock2State& pad, uint16_t& p
     if (!active())
         return;
     const bool free = freeGameplay(ram);
+    aimHeld.store(free && (pressed & reo::PS2_R1), std::memory_order_relaxed);
+    float mx = 0.0f, my = 0.0f;
     if (free) {
         constexpr uint16_t dpad = reo::PS2_UP | reo::PS2_DOWN | reo::PS2_LEFT | reo::PS2_RIGHT;
         const bool stickRests = std::abs(int(pad.left_x) - 128) <= 32 && std::abs(int(pad.left_y) - 128) <= 32;
@@ -149,6 +163,10 @@ inline void filterPad(const uint8_t* ram, reo::DualShock2State& pad, uint16_t& p
             pressed &= uint16_t(~dpad);
             pad.buttons |= dpad;
             pad.left_x = pad.left_y = 0x80;
+            const float tilt = aimPitch.load(std::memory_order_relaxed);
+            const uint16_t vertical = tilt < kAimUpPitch ? reo::PS2_UP : tilt > kAimDownPitch ? reo::PS2_DOWN : 0;
+            pressed |= vertical;
+            pad.buttons &= uint16_t(~vertical);
         } else if ((pressed & dpad) && stickRests) {
             const int x = ((pressed & reo::PS2_RIGHT) ? 1 : 0) - ((pressed & reo::PS2_LEFT) ? 1 : 0);
             const int y = ((pressed & reo::PS2_DOWN) ? 1 : 0) - ((pressed & reo::PS2_UP) ? 1 : 0);
@@ -158,7 +176,15 @@ inline void filterPad(const uint8_t* ram, reo::DualShock2State& pad, uint16_t& p
             pressed &= uint16_t(~dpad);
             pad.buttons |= dpad;
         }
+        if (!aiming(ram)) {
+            mx = (float(pad.left_x) - 128.0f) / 127.0f;
+            my = (float(pad.left_y) - 128.0f) / 127.0f;
+            if (mx * mx + my * my < 0.3f * 0.3f)
+                mx = my = 0.0f;
+        }
     }
+    moveX.store(mx, std::memory_order_relaxed);
+    moveY.store(my, std::memory_order_relaxed);
     if (!free || !(pad.buttons & reo::PS2_L2)) {
         stickX.store(0.0f, std::memory_order_relaxed);
         stickY.store(0.0f, std::memory_order_relaxed);
@@ -193,10 +219,13 @@ inline void probeFrame(const uint8_t* ram) {
     if (++frame % 60 != 0 || ram[game.gameState] != 2u || ram[game.localSlot] >= 4u)
         return;
     const uint32_t actor = game.actors + ram[game.localSlot] * game.actorStride;
-    std::fprintf(stderr, "[MODCAM-PROBE] f=%u room=%u slot=%u xyz=%.1f,%.1f,%.1f yaw=%d cam=%.1f/%.1f\n", frame,
-                 u16(ram, game.room), ram[game.localSlot], f32(ram, actor + 0x38u), f32(ram, actor + 0x3cu),
+    std::fprintf(stderr,
+                 "[MODCAM-PROBE] f=%u room=%u slot=%u xyz=%.1f,%.1f,%.1f yaw=%d cam=%.1f/%.1f "
+                 "guards=%02x,%02x,%02x,%02x,%02x free=%d state=%u/%u\n",
+                 frame, u16(ram, game.room), ram[game.localSlot], f32(ram, actor + 0x38u), f32(ram, actor + 0x3cu),
                  f32(ram, actor + 0x40u), int(int16_t(u16(ram, actor + 0x92u))), yaw * 57.2957795f,
-                 pitch * 57.2957795f);
+                 pitch * 57.2957795f, ram[0x4badeeu], ram[0x755ec4u], ram[0x4badf8u], ram[0x4bae8du],
+                 ram[0x4bae07u], int(freeGameplay(ram)), ram[actor + 8u], ram[actor + 9u]);
     for (uint32_t row = 0; row < 0x80u; row += 0x10u) {
         const uint32_t a = game.cameraBlock + row;
         std::fprintf(stderr, "[MODCAM-PROBE]   %06x: %12.3f %12.3f %12.3f %12.3f\n", a, f32(ram, a),
@@ -279,8 +308,16 @@ inline bool follow(uint8_t* ram) {
             yaw += std::remainder(heading - yaw, tau) * rig.recenter;
         yaw = std::remainder(yaw, tau);
     }
-    // Aim view and facing: blend the rig, and turn the character to the camera.
-    const bool aim = aiming(ram);
+    // Aim view and facing: blend the rig as soon as R1 is pressed (with the
+    // ready animation), and turn the character to the camera.
+    const bool aim = aiming(ram) || aimHeld.load(std::memory_order_relaxed);
+    static float aimSeconds = 0.0f;
+    aimSeconds = aim ? aimSeconds + dt : 0.0f;
+    aimPitch.store(pitch * 57.2957795f, std::memory_order_relaxed);
+    // RE2-style reticle: shown while aiming, closing in over about a second.
+    const float spread = std::fmax(0.15f, 1.0f - aimSeconds / 0.9f);
+    reo::overlay::crosshair.store(aiming(ram) ? 1u | (uint32_t(std::lround(spread * 255.0f)) << 8) : 0u,
+                                  std::memory_order_relaxed);
     if (dt > 0.0f)
         aimBlend = std::fmin(std::fmax(aimBlend + (aim ? dt : -dt) / kAimBlendSeconds, 0.0f), 1.0f);
     else
@@ -296,6 +333,18 @@ inline bool follow(uint8_t* ram) {
     if (aim) {
         const int16_t facing = int16_t(std::lround(yaw * 65536.0f / tau));
         std::memcpy(ram + actor + 0x92u, &facing, 2);
+    } else if (freeGameplay(ram) && ram[actor + 8u] == 1u) {
+        // Moving: face camera + stick direction (stick up = camera forward,
+        // stick right = lower yaw), turning at a bounded rate.
+        const float mx = moveX.load(std::memory_order_relaxed), my = moveY.load(std::memory_order_relaxed);
+        if (mx != 0.0f || my != 0.0f) {
+            const float desired = yaw - std::atan2(mx, -my);
+            const float step = kTurnDegPerSec * degree * dt;
+            const float delta = std::remainder(desired - heading, tau);
+            const float turned = heading + std::fmin(std::fmax(delta, -step), step);
+            const int16_t facing = int16_t(std::lround(std::remainder(turned, tau) * 65536.0f / tau));
+            std::memcpy(ram + actor + 0x92u, &facing, 2);
+        }
     }
     const float fx = std::sin(yaw), fz = std::cos(yaw);
     // Right of the facing direction (heading = atan2(x, z)).

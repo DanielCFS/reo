@@ -1,6 +1,6 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
-layout(push_constant) uniform PresentSize { uvec2 source; uvec2 destination; uint flags; uint fps; uint frameMs; uint ups; } extent;
+layout(push_constant) uniform PresentSize { uvec2 source; uvec2 destination; uint flags; uint fps; uint frameMs; uint ups; uint crosshair; } extent;
 #define SMAA_GLSL_4
 #define SMAA_PRESET_HIGH
 #define SMAA_RT_METRICS vec4(1.0 / vec2(extent.destination), vec2(extent.destination))
@@ -22,5 +22,6 @@ void main() {
         vec4 offset; SMAANeighborhoodBlendingVS(uv, offset);
         hostColor = displayColor(SMAANeighborhoodBlendingPS(uv, offset, colorTexture, weightTexture).rgb, extent.flags);
     }
+    hostColor = crosshairOverlay(hostColor, origin + picture * 0.5, picture.y / 448.0, extent.crosshair);
     hostColor = performanceOverlay(hostColor, extent.destination, extent.fps, extent.frameMs, extent.ups);
 }

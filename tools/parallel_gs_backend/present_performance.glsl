@@ -27,6 +27,21 @@ uint performanceCharacter(int row, int column, uint value) {
     if (row == 1 && column == 15) return 12u;
     return 20u;
 }
+// Modern camera aiming reticle: centre dot and four ticks with a dark outline,
+// the ticks closing in as the aim settles. Scale is output pixels per game line.
+vec4 crosshairOverlay(vec4 color, vec2 centre, float scale, uint value) {
+    if ((value & 1u) == 0u) return color;
+    float spread = float((value >> 8) & 255u) / 255.0;
+    vec2 d = (gl_FragCoord.xy - centre) / max(scale, 1.0);
+    vec2 a = abs(d);
+    float gap = 7.0 + spread * 18.0, len = 9.0, half_ = 1.0, edge = 1.0;
+    bool tick = (a.y <= half_ && a.x >= gap && a.x <= gap + len) || (a.x <= half_ && a.y >= gap && a.y <= gap + len);
+    bool dot = length(d) <= 1.5;
+    if (tick || dot) return vec4(mix(color.rgb, vec3(1.0), 0.92), color.a);
+    bool outline = (a.y <= half_ + edge && a.x >= gap - edge && a.x <= gap + len + edge) ||
+                   (a.x <= half_ + edge && a.y >= gap - edge && a.y <= gap + len + edge) || length(d) <= 1.5 + edge;
+    return outline ? vec4(color.rgb * 0.3, color.a) : color;
+}
 vec4 performanceOverlay(vec4 color, uvec2 destination, uint fps, uint frameMs, uint ups) {
     if ((fps & 0x80000000u) == 0u) return color;
     int scale = clamp(int(destination.y) / 480, 2, 4);
