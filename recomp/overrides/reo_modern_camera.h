@@ -3,6 +3,7 @@
 #include "ps2_runtime_macros.h"
 #include "runtime/input/input.h"
 #include "runtime/gs/performance.h"
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -33,6 +34,8 @@
 // once per second during gameplay (investigation aid, no RAM writes).
 
 void o0_00375920_0x375920(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime);
+void o2_0065ED70_0x65ed70(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime);
+void o2_00586AA0_0x586aa0(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime);
 
 namespace reo::modern_camera {
 struct Addresses {
@@ -146,6 +149,136 @@ inline bool aiming(const uint8_t* ram) {
         return false;
     const uint32_t actor = localActor(ram);
     return ram[actor + 8u] == 2u && ram[actor + 9u] == 1u;
+}
+
+// Free aim (REO_MODERN_CAMERA_FREE_AIM, default on with the modern camera).
+// File #1 player actors keep their aim target at +0xCDC (spawn index, 0xFF none;
+// spawn record 0x74F250 + i*96, byte +1 = enemy slot) and the vertical aim at
+// +0xBC8 (int16, +-0x2000, down positive). The original search o2 0x65ED70 takes
+// the nearest valid enemy in any direction (per-character cone 0x71B960 = 360
+// degrees) from the local player's distance-sorted list 0x3B2E10 + slot*50 with
+// per-enemy {distance, angle, blocked} records at 0x3B41C0 + slot*400. The modern
+// camera picks the enemy nearest the crosshair ray instead, keeps it while the
+// crosshair stays on it, and without a target aims where the crosshair points
+// (o2 0x586AA0 otherwise snaps the vertical aim to three digital levels).
+struct AimRay {
+    bool valid = false;
+    float origin[3]{}, direction[3]{};
+};
+inline AimRay aimRay;
+inline int16_t freeAimPitch = 0;
+inline constexpr float kLockConeDeg = 7.0f, kHoldConeDeg = 12.0f;
+inline constexpr uint32_t kEnemies = 0x42eb00u, kEnemyStride = 0xd90u, kNoTarget = 0xffu;
+
+inline bool freeAimEnabled() {
+    static const bool on = [] {
+        const char* value = std::getenv("REO_MODERN_CAMERA_FREE_AIM");
+        return !value || std::strcmp(value, "0") != 0;
+    }();
+    return on;
+}
+inline uint32_t u32(const uint8_t* ram, uint32_t address) {
+    uint32_t value;
+    std::memcpy(&value, ram + address, 4);
+    return value;
+}
+inline bool guestRange(uint32_t address, uint32_t bytes) {
+    return address >= 0x100000u && address < 0x2000000u - bytes;
+}
+// Point to aim at on an enemy: the body height the original search checks
+// (bone table +0x34, entry [+0x551], +0x820 -> +0x34), else waist height.
+inline bool enemyPoint(const uint8_t* ram, uint32_t enemy, float point[3]) {
+    point[0] = f32(ram, enemy + 0x38u);
+    point[1] = f32(ram, enemy + 0x3cu) + 100.0f;
+    point[2] = f32(ram, enemy + 0x40u);
+    const uint32_t table = u32(ram, enemy + 0x34u);
+    if (guestRange(table, 0x900u)) {
+        const uint32_t bone = u32(ram, table + ram[enemy + 0x551u] * 4u + 0x820u);
+        if (guestRange(bone, 0x40u)) {
+            const float y = f32(ram, bone + 0x34u);
+            if (std::isfinite(y) && y > point[1] - 160.0f && y < point[1] + 200.0f)
+                point[1] = y;
+        }
+    }
+    return std::isfinite(point[0]) && std::isfinite(point[1]) && std::isfinite(point[2]);
+}
+inline float rayAngleDeg(const float point[3]) {
+    const float v[3] = {point[0] - aimRay.origin[0], point[1] - aimRay.origin[1], point[2] - aimRay.origin[2]};
+    const float length = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    if (!(length > 1.0f))
+        return 180.0f;
+    const float c = (v[0] * aimRay.direction[0] + v[1] * aimRay.direction[1] + v[2] * aimRay.direction[2]) / length;
+    return std::acos(std::fmin(std::fmax(c, -1.0f), 1.0f)) * 57.2957795f;
+}
+// The enemy currently targeted by a player actor, or 0.
+inline uint32_t currentTarget(const uint8_t* ram, uint32_t actor) {
+    const uint8_t spawn = ram[actor + 0xcdcu];
+    if (spawn == kNoTarget)
+        return 0;
+    const uint8_t slot = ram[0x74f251u + spawn * 96u];
+    if (slot >= 50u)
+        return 0;
+    const uint32_t enemy = kEnemies + slot * kEnemyStride;
+    return ram[enemy] ? enemy : 0;
+}
+// Same validity rules as the original search (weapon range, line of sight flag,
+// height window), choosing the smallest angle from the crosshair within cone.
+inline uint32_t pickTarget(const uint8_t* ram, uint32_t actor, float coneDeg, uint32_t keep = 0) {
+    const uint8_t slot = ram[actor + 3u];
+    if (!aimRay.valid || ram[actor + 2u] != 0 || slot >= 4u)
+        return 0;
+    const uint32_t list = 0x3b2e10u + slot * 50u, data = 0x3b41c0u + slot * 400u;
+    const uint16_t weapon = u16(ram, actor + 0xca8u);
+    const float range = weapon < 256u ? float(ram[0x719a6au + weapon * 68u]) * 200.0f : 0.0f;
+    const float height = f32(ram, actor + 0x3cu);
+    uint32_t best = 0;
+    float bestAngle = coneDeg;
+    for (uint32_t i = 0; i < 50u; ++i) {
+        const uint8_t index = ram[list + i];
+        if (index == kNoTarget)
+            break;
+        if (index >= 50u)
+            continue;
+        const uint32_t enemy = kEnemies + index * kEnemyStride, record = data + index * 8u;
+        if ((u32(ram, enemy + 0xc94u) & 1u) || ram[record + 6u] || !(f32(ram, record) <= range) ||
+            height - f32(ram, enemy + 0x3cu) > 100.0f)
+            continue;
+        float point[3];
+        if (!enemyPoint(ram, enemy, point))
+            continue;
+        const float angle = rayAngleDeg(point) - (enemy == keep ? kHoldConeDeg - kLockConeDeg : 0.0f);
+        if (angle < bestAngle) {
+            bestAngle = angle;
+            best = enemy;
+        }
+    }
+    return best;
+}
+// Write a target the way the original search does (+0xCD4/CD6/CD8, vertical aim
+// restarts at level when the target changes).
+inline void setTarget(uint8_t* ram, uint32_t actor, uint32_t enemy) {
+    if (!enemy) {
+        ram[actor + 0xcdcu] = uint8_t(kNoTarget);
+        return;
+    }
+    const uint8_t spawn = ram[enemy + 0xb98u];
+    if (ram[actor + 0xcdcu] == spawn)
+        return;
+    const uint32_t index = (enemy - kEnemies) / kEnemyStride;
+    const uint16_t angle = u16(ram, 0x3b41c0u + ram[actor + 3u] * 400u + index * 8u + 4u), zero = 0;
+    std::memcpy(ram + actor + 0xcd4u, &zero, 2);
+    std::memcpy(ram + actor + 0xcd6u, &angle, 2);
+    std::memcpy(ram + actor + 0xcd8u, &zero, 2);
+    std::memcpy(ram + actor + 0xbc8u, &zero, 2);
+    ram[actor + 0xcdcu] = spawn;
+}
+// Per frame while aiming: keep the target while the crosshair stays near it,
+// otherwise lock whatever the crosshair now covers (or nothing).
+inline uint32_t maintainTarget(uint8_t* ram, uint32_t actor) {
+    const uint32_t current = currentTarget(ram, actor);
+    const uint32_t next = pickTarget(ram, actor, kLockConeDeg, current);
+    setTarget(ram, actor, next);
+    return next;
 }
 
 // Pad feeder hook (pressed: active-high PS2 buttons sent to the game).
@@ -479,6 +612,23 @@ inline bool follow(uint8_t* ram) {
     wf32(ram, game.eye + 0x10u, ey + dy * reach);
     wf32(ram, game.eye + 0x14u, ez + dz * reach);
     applyFov(ram, view.fovDegrees);
+    aimRay = {true, {ex, ey, ez}, {dx, dy, dz}};
+    if (freeAimEnabled() && aiming(ram)) {
+        // Face and aim at the target, or at the point the crosshair covers.
+        const uint32_t target = maintainTarget(ram, actor);
+        float point[3] = {ex + dx * 1200.0f, ey + dy * 1200.0f, ez + dz * 1200.0f};
+        if (target)
+            enemyPoint(ram, target, point);
+        const float gx = point[0] - x, gz = point[2] - z, gy = (y + 130.0f) - point[1];
+        const float horizontal = std::sqrt(gx * gx + gz * gz);
+        if (horizontal > 30.0f) {
+            const int16_t facing = int16_t(std::lround(std::atan2(gx, gz) * 65536.0f / tau));
+            std::memcpy(ram + actor + 0x92u, &facing, 2);
+            freeAimPitch = int16_t(std::clamp(std::lround(std::atan2(gy, horizontal) * 65536.0f / tau), -0x2000L, 0x2000L));
+        }
+        if (target)
+            reo::overlay::crosshair.fetch_or(2u, std::memory_order_relaxed);
+    }
     if (probe) {
         static unsigned calls = 0;
         if (++calls % 120 == 1)
@@ -492,6 +642,28 @@ inline void cameraApply(uint8_t* ram, R5900Context* ctx, PS2Runtime* runtime) {
     if (ctx->pc == game.cameraApply && enabled)
         follow(ram);
     o0_00375920_0x375920(ram, ctx, runtime);
+}
+
+inline bool freeAimActor(const uint8_t* ram, uint32_t actor) {
+    return enabled && freeAimEnabled() && ram[game.localSlot] < 4u && actor == localActor(ram);
+}
+// o2 0x65ED70(actor a0, range f12) -> enemy (v0): aim target search on R1 / L1.
+inline void targetSearch(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+    const uint32_t actor = GPR_U32(ctx, 4);
+    o2_0065ED70_0x65ed70(rdram, ctx, runtime);
+    // +0xFF0 marks the online path that takes a target chosen elsewhere.
+    if (!freeAimActor(rdram, actor) || rdram[actor + 0xff0u])
+        return;
+    const uint32_t enemy = pickTarget(rdram, actor, kLockConeDeg);
+    setTarget(rdram, actor, enemy);
+    SET_GPR_U32(ctx, 2, enemy);
+}
+// o2 0x586AA0(actor a0, ...): vertical aim; without a target it follows the crosshair.
+inline void verticalAim(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+    const uint32_t actor = GPR_U32(ctx, 4);
+    o2_00586AA0_0x586aa0(rdram, ctx, runtime);
+    if (freeAimActor(rdram, actor) && rdram[actor + 0xcdcu] == kNoTarget && aiming(rdram))
+        std::memcpy(rdram + actor + 0xbc8u, &freeAimPitch, 2);
 }
 
 // REO_MODERN_CAMERA_PROBE=3: every 40 frame services outside free gameplay, write
@@ -509,13 +681,19 @@ inline void snapshotRam(const uint8_t* ram) {
     }();
     static unsigned calls = 0, index = 0;
     static const auto start = std::chrono::steady_clock::now();
-    if (level != 3 && level != 4)
+    // Level 5: in gameplay, every 2nd frame-service call while aiming and every
+    // 20th otherwise (aim-target reverse engineering).
+    if (level == 5) {
+        if (ram[game.gameState] != 2u || ++calls % (aiming(ram) ? 2u : 20u) != 0 || index >= 30)
+            return;
+    } else if (level != 3 && level != 4) {
         return;
+    }
     if (level == 3 && (ram[game.gameState] != 2u || freeGameplay(ram)))
         return;
-    if (level == 4 && std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() < after)
+    if ((level == 4 || level == 5) && std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() < after)
         return;
-    if (++calls % 40 != 0 || index >= 30)
+    if (level != 5 && (++calls % 40 != 0 || index >= 30))
         return;
     char name[64];
     std::snprintf(name, sizeof(name), "modcam_ram_%03u.bin", index);
@@ -566,7 +744,7 @@ inline void service(uint8_t* ram, R5900Context* ctx, PS2Runtime* runtime) {
 inline void install(PS2Runtime& runtime, Addresses addresses = File1) {
     if (const char* level = std::getenv("REO_MODERN_CAMERA_PROBE"))
         probe = std::strcmp(level, "1") == 0 || std::strcmp(level, "2") == 0 || std::strcmp(level, "3") == 0 ||
-                std::strcmp(level, "4") == 0;
+                std::strcmp(level, "4") == 0 || std::strcmp(level, "5") == 0;
     enabled = flag("REO_MODERN_CAMERA");
     if (!probe && !enabled)
         return;
@@ -596,8 +774,15 @@ inline void install(PS2Runtime& runtime, Addresses addresses = File1) {
     runtime.registerFunction(game.frameService, service);
     if (enabled)
         // Overlay-aware: replaces the function only while overlay 0 is resident.
+    {
         runtime.registerOverlayFunction(game.overlayBase, 0x336f574du, 4u, game.overlayId, game.cameraApply,
                                         cameraApply);
+        if (freeAimEnabled()) {
+            // Gameplay overlay 2 (base 0x570000, id 3).
+            runtime.registerOverlayFunction(0x570000u, 0x336f574du, 4u, 3u, 0x65ed70u, targetSearch);
+            runtime.registerOverlayFunction(0x570000u, 0x336f574du, 4u, 3u, 0x586aa0u, verticalAim);
+        }
+    }
     std::fprintf(stderr,
                  "[MODCAM-1] installed follow=%d probe=%d rig=%.0f,%.0f,%.0f,%.0f,%.0f,%.1f,%.2f "
                  "controls=%.0f,%.0f,%.2f,%.0f\n",

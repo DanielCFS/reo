@@ -37,7 +37,9 @@ vec4 crosshairOverlay(vec4 color, vec2 centre, float scale, uint value) {
     float gap = 3.0 + spread * 10.0, len = 5.0, half_ = 0.5, edge = 0.7;
     bool tick = (a.y <= half_ && a.x >= gap && a.x <= gap + len) || (a.x <= half_ && a.y >= gap && a.y <= gap + len);
     bool dot = length(d) <= 0.8;
-    if (tick || dot) return vec4(mix(color.rgb, vec3(1.0), 0.92), color.a);
+    // Bit 1: a target is locked (modern camera free aim); the reticle turns red.
+    vec3 ink = (value & 2u) != 0u ? vec3(1.0, 0.28, 0.22) : vec3(1.0);
+    if (tick || dot) return vec4(mix(color.rgb, ink, 0.92), color.a);
     bool outline = (a.y <= half_ + edge && a.x >= gap - edge && a.x <= gap + len + edge) ||
                    (a.x <= half_ + edge && a.y >= gap - edge && a.y <= gap + len + edge) || length(d) <= 0.8 + edge;
     return outline ? vec4(color.rgb * 0.3, color.a) : color;
