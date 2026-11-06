@@ -543,7 +543,7 @@
                 <UniformGrid x:Name="BindingRows" Columns="2" />
                 <StackPanel x:Name="KeyboardStickBindingsPanel" IsVisible="false" Margin="0,20,0,0">
                   <compat:Rc1TextBlock Text="RIGHT STICK / VOICE COMMANDS" FontSize="14" Foreground="{StaticResource Muted}" Margin="0,0,0,8" />
-                  <compat:Rc1TextBlock Text="D-pad keys use tank controls. Assigning a key clears its previous keyboard binding." Classes="Hint" FontSize="14" Margin="0,0,0,8" />
+                  <compat:Rc1TextBlock Text="D-pad keys use tank controls (camera-relative with Modern camera). Assigning a key clears its previous keyboard binding." Classes="Hint" FontSize="14" Margin="0,0,0,8" />
                   <UniformGrid x:Name="KeyboardStickBindings" Columns="2" />
                 </StackPanel>
                 <Grid Margin="0,14,0,8">
@@ -552,7 +552,10 @@
                     <ColumnDefinition Width="Auto" />
                   </Grid.ColumnDefinitions>
                   <compat:Rc1TextBlock Text="PS2 button mapping" FontSize="14" Foreground="{StaticResource Muted}" VerticalAlignment="Center" />
-                  <Button x:Name="ResetBindingsButton" Click="ResetBindings" Grid.Column="1" Content="Reset bindings" VerticalAlignment="Center" />
+                  <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button x:Name="ModernBindingsButton" Click="UseModernBindings" Content="RE2 Remake layout" Margin="0,0,8,0" ToolTip.Tip="WASD move, F interact, Backspace cancel, V ad-lib, M map, R reload, Tab inventory, Esc pause. With Modern camera: mouse look, right/left mouse button aim/fire, Shift run." />
+                    <Button x:Name="ResetBindingsButton" Click="ResetBindings" Content="Reset bindings" />
+                  </StackPanel>
                 </Grid>
               </StackPanel>
               <StackPanel x:Name="InputLayoutPanel" IsVisible="false">

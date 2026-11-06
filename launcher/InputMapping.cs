@@ -35,6 +35,17 @@ public static partial class InputMapping {
                 ["L1"] = '1',      ["R1"] = '2',        ["L2"] = '3',        ["R2"] = '4',
                 ["Start"] = 13,    ["Select"] = 8,      ["L3"] = 'Z',        ["R3"] = 'X',
                 ["CameraUp"] = 38, ["CameraDown"] = 40, ["CameraLeft"] = 37, ["CameraRight"] = 39 };
+    // PC layout in the style of modern Resident Evil remakes, mapped onto Outbreak's
+    // default controller type: WASD move, F interact/attack, Backspace cancel,
+    // V ad-lib, M map, R reload/switch target, Tab inventory, Esc pause. With the
+    // modern camera the game itself adds mouse look, right/left mouse button aim/fire
+    // and Shift to run, and WASD walks relative to the camera.
+    public static Dictionary<string, int> ModernKeyboardDefaults() =>
+        new() { ["Up"] = 'W',      ["Down"] = 'S',      ["Left"] = 'A',      ["Right"] = 'D',
+                ["Cross"] = 'F',   ["Circle"] = 8,      ["Square"] = 'V',    ["Triangle"] = 'M',
+                ["L1"] = 'R',      ["R1"] = '2',        ["L2"] = '3',        ["R2"] = '4',
+                ["Start"] = 9,     ["Select"] = 27,     ["L3"] = 'Z',        ["R3"] = 'X',
+                ["CameraUp"] = 38, ["CameraDown"] = 40, ["CameraLeft"] = 37, ["CameraRight"] = 39 };
     // One keyboard key belongs to one action. In particular, assigning arrows to
     // the D-pad must release the old right-stick/voice-command binding.
     public static string[] BindKeyboard(Dictionary<string,int> bindings,string action,int key) {
@@ -75,6 +86,7 @@ public static partial class InputMapping {
         if (kind == "keyboard")
             return code switch {
                 32 => "Space",
+                9 => "Tab",
                 13 => "Enter",
                 8 => "Backspace",
                 27 => "Esc",

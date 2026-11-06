@@ -2374,8 +2374,34 @@ void modernCameraMouse(const uint8_t* ram) {
         SetCursorPos(centre.x, centre.y);
     }
 }
+// PC controls in the style of modern remakes, during free gameplay with the game
+// focused: right mouse button aims (R1), left mouse button fires/interacts (Cross)
+// and Shift runs. Running is resolved through the game's own control-type table,
+// so it follows whichever face button the selected controller type assigns.
+uint16_t modernCameraKeys(const uint8_t* ram) {
+    if (!reo::modern_camera::active() || !reo::modern_camera::freeGameplay(ram))
+        return 0;
+    HWND top = GetForegroundWindow();
+    DWORD pid = 0;
+    if (top)
+        GetWindowThreadProcessId(top, &pid);
+    if (!top || pid != GetCurrentProcessId())
+        return 0;
+    auto down = [](int key) { return (GetAsyncKeyState(key) & 0x8000) != 0; };
+    uint16_t buttons = 0;
+    if (g_cameraCursorHidden.load()) {
+        if (down(VK_RBUTTON))
+            buttons |= reo::PS2_R1;
+        if (down(VK_LBUTTON))
+            buttons |= reo::PS2_CROSS;
+    }
+    if (down(VK_SHIFT))
+        buttons |= pad2TestActorAction(ram, 0x10u);
+    return buttons;
+}
 #else
 void modernCameraMouse(const uint8_t*) {}
+uint16_t modernCameraKeys(const uint8_t*) { return 0; }
 #endif
 
 void pad2FeederLoop() {
@@ -2436,9 +2462,11 @@ void pad2FeederLoop() {
                 else
                     pressed |= pad2TestWorldTarget(routeRam, now, hostPad);
             }
-            // Modern camera: right stick orbits the camera (L2 keeps the original ad-lib).
-            reo::modern_camera::filterPad(routeRam, hostPad);
+            // Modern camera: right stick/mouse orbit the camera (L2 keeps fixed chat),
+            // D-pad walks camera-relative, plus PC mouse buttons and Shift to run.
+            reo::modern_camera::filterPad(routeRam, hostPad, pressed);
             modernCameraMouse(routeRam);
+            pressed |= modernCameraKeys(routeRam);
             g_pad2.lastPressed = pressed;
             const uint16_t data = (uint16_t)~pressed; // active-low
             // Keep digital directions independent from the analog sticks. Both

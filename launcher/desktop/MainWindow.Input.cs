@@ -139,6 +139,7 @@ public partial class MainWindow {
         KeyboardStickBindings.Children.Clear();
         bool keyboard = controller.SelectedDevice.Kind == "keyboard";
         KeyboardStickBindingsPanel.Visibility = keyboard ? Visibility.Visible : Visibility.Collapsed;
+        ModernBindingsButton.IsVisible = keyboard;
         if (keyboard) foreach (var action in InputMapping.Camera) {
             var binding = CreateMapBinding(action.Id, action.Label);
             binding.Margin = new Thickness(0, 4, 14, 4);
@@ -253,6 +254,15 @@ public partial class MainWindow {
         CapturePanel.Visibility = Visibility.Collapsed;
         if (active)
             BuildBindingRows();
+    }
+    void UseModernBindings(object? sender, RoutedEventArgs e) {
+        CancelCapture(sender, e);
+        if (controller.SelectedDevice.Kind != "keyboard")
+            return;
+        settings.Keyboard = InputMapping.ModernKeyboardDefaults();
+        SaveInputPreferences();
+        BuildBindingRows();
+        Status.Text = "RE2 Remake keyboard layout applied.";
     }
     void ResetBindings(object? sender, RoutedEventArgs e) {
         CancelCapture(sender, e);

@@ -69,6 +69,11 @@ struct Rig {
     float recenter = 0.0f;    // per-update pull back behind the character after idle; 0 = stays put
 };
 inline Rig rig;
+// Aiming (R1 held) blends to a tighter over-the-shoulder view, as in modern
+// remakes; the character then faces where the camera looks.
+inline Rig aimRig{95.0f, 160.0f, 50.0f, 600.0f, 140.0f, 40.0f, 0.0f};
+inline constexpr float kAimBlendSeconds = 0.18f;
+inline float aimBlend = 0.0f; // 0 = normal rig, 1 = aim rig
 
 // Orbit input. REO_MODERN_CAMERA_CONTROLS overrides
 // "stickYawDegPerSec,stickPitchDegPerSec,mouseDegPerPixel,invertY".
@@ -117,12 +122,44 @@ inline bool freeGameplay(const uint8_t* ram) {
            ram[0x4badf8u] == 0 && ram[0x4bae8du] == 0 && ram[game.localSlot] < 4u && ram[0x4bae07u] == 0;
 }
 
-// Pad feeder hook: route the right stick to the camera during free gameplay,
-// except while L2 is held (ad-lib). The game then sees a centred right stick.
-inline void filterPad(const uint8_t* ram, reo::DualShock2State& pad) {
+inline uint32_t localActor(const uint8_t* ram) {
+    return game.actors + ram[game.localSlot] * game.actorStride;
+}
+// Weapon readied (R1): actor state 2, sub-state 1.
+inline bool aiming(const uint8_t* ram) {
+    if (!ram || ram[game.localSlot] >= 4u)
+        return false;
+    const uint32_t actor = localActor(ram);
+    return ram[actor + 8u] == 2u && ram[actor + 9u] == 1u;
+}
+
+// Pad feeder hook (pressed: active-high PS2 buttons sent to the game).
+// During free gameplay the D-pad becomes a camera-relative left-stick direction
+// (keyboard WASD reaches the game as D-pad), and while aiming the directions are
+// withheld because the camera sets the character's facing. The right stick turns
+// the camera except while L2 is held (fixed chat); the game then sees it centred.
+inline void filterPad(const uint8_t* ram, reo::DualShock2State& pad, uint16_t& pressed) {
     if (!active())
         return;
-    if (!freeGameplay(ram) || !(pad.buttons & reo::PS2_L2)) {
+    const bool free = freeGameplay(ram);
+    if (free) {
+        constexpr uint16_t dpad = reo::PS2_UP | reo::PS2_DOWN | reo::PS2_LEFT | reo::PS2_RIGHT;
+        const bool stickRests = std::abs(int(pad.left_x) - 128) <= 32 && std::abs(int(pad.left_y) - 128) <= 32;
+        if (aiming(ram)) {
+            pressed &= uint16_t(~dpad);
+            pad.buttons |= dpad;
+            pad.left_x = pad.left_y = 0x80;
+        } else if ((pressed & dpad) && stickRests) {
+            const int x = ((pressed & reo::PS2_RIGHT) ? 1 : 0) - ((pressed & reo::PS2_LEFT) ? 1 : 0);
+            const int y = ((pressed & reo::PS2_DOWN) ? 1 : 0) - ((pressed & reo::PS2_UP) ? 1 : 0);
+            const float scale = (x && y) ? 0.7071f : 1.0f;
+            pad.left_x = uint8_t(std::lround(128.0f + 127.0f * scale * float(x)));
+            pad.left_y = uint8_t(std::lround(128.0f + 127.0f * scale * float(y)));
+            pressed &= uint16_t(~dpad);
+            pad.buttons |= dpad;
+        }
+    }
+    if (!free || !(pad.buttons & reo::PS2_L2)) {
         stickX.store(0.0f, std::memory_order_relaxed);
         stickY.store(0.0f, std::memory_order_relaxed);
         return;
@@ -165,17 +202,37 @@ inline void probeFrame(const uint8_t* ram) {
         std::fprintf(stderr, "[MODCAM-PROBE]   %06x: %12.3f %12.3f %12.3f %12.3f\n", a, f32(ram, a),
                      f32(ram, a + 4), f32(ram, a + 8), f32(ram, a + 12));
     }
+    // REO_MODERN_CAMERA_PROBE=2: append the local actor record to modcam_actor.bin
+    // (u32 frame, then actorStride bytes) for offline state diffs.
+    static const bool dump = [] {
+        const char* value = std::getenv("REO_MODERN_CAMERA_PROBE");
+        return value && std::strcmp(value, "2") == 0;
+    }();
+    if (dump) {
+        // Control type and its Triangle/Cross/Circle action masks (0x2343C0 + type*12).
+        const uint8_t type = ram[0x3243ecu];
+        uint32_t masks[3] = {};
+        if (type < 3u)
+            std::memcpy(masks, ram + 0x2343c0u + type * 12u, sizeof(masks));
+        std::fprintf(stderr, "[MODCAM-PROBE] control type=%u triangle=%08x cross=%08x circle=%08x\n", type,
+                     masks[0], masks[1], masks[2]);
+        if (std::FILE* out = std::fopen("modcam_actor.bin", "ab")) {
+            std::fwrite(&frame, 4, 1, out);
+            std::fwrite(ram + actor, 1, game.actorStride, out);
+            std::fclose(out);
+        }
+    }
 }
 
 inline void wf32(uint8_t* ram, uint32_t address, float value) {
     std::memcpy(ram + address, &value, 4);
 }
 
-inline void applyFov(uint8_t* ram) {
+inline void applyFov(uint8_t* ram, float degrees) {
     const float scale = f32(ram, game.fovScale);
     if (!std::isfinite(scale) || scale <= 0.0f)
         return;
-    const float value = rig.fovDegrees * 0.01745329252f / scale;
+    const float value = degrees * 0.01745329252f / scale;
     if (std::isfinite(value) && value > 0.0f)
         wf32(ram, game.fov, value);
 }
@@ -222,23 +279,41 @@ inline bool follow(uint8_t* ram) {
             yaw += std::remainder(heading - yaw, tau) * rig.recenter;
         yaw = std::remainder(yaw, tau);
     }
+    // Aim view and facing: blend the rig, and turn the character to the camera.
+    const bool aim = aiming(ram);
+    if (dt > 0.0f)
+        aimBlend = std::fmin(std::fmax(aimBlend + (aim ? dt : -dt) / kAimBlendSeconds, 0.0f), 1.0f);
+    else
+        aimBlend = aim ? 1.0f : 0.0f;
+    const float t = aimBlend * aimBlend * (3.0f - 2.0f * aimBlend);
+    auto mix = [t](float a, float b) { return a + (b - a) * t; };
+    Rig view = rig;
+    view.distance = mix(rig.distance, aimRig.distance);
+    view.height = mix(rig.height, aimRig.height);
+    view.side = mix(rig.side, aimRig.side);
+    view.lookAhead = mix(rig.lookAhead, aimRig.lookAhead);
+    view.fovDegrees = mix(rig.fovDegrees, aimRig.fovDegrees);
+    if (aim) {
+        const int16_t facing = int16_t(std::lround(yaw * 65536.0f / tau));
+        std::memcpy(ram + actor + 0x92u, &facing, 2);
+    }
     const float fx = std::sin(yaw), fz = std::cos(yaw);
     // Right of the facing direction (heading = atan2(x, z)).
     const float rx = -fz, rz = fx;
     // Orbit around the shoulder point; at the resting pitch this matches the rig.
     const float cp = std::cos(pitch), sp = std::sin(pitch);
     const float dx = fx * cp, dy = -sp, dz = fz * cp;
-    const float px = x + rx * rig.side, py = y + rig.height, pz = z + rz * rig.side;
-    const float ex = px - dx * rig.distance, ey = py - dy * rig.distance - std::sin(restingPitch()) * rig.distance,
-                ez = pz - dz * rig.distance;
-    const float reach = rig.distance + rig.lookAhead;
+    const float px = x + rx * view.side, py = y + view.height, pz = z + rz * view.side;
+    const float ex = px - dx * view.distance, ey = py - dy * view.distance - std::sin(restingPitch()) * view.distance,
+                ez = pz - dz * view.distance;
+    const float reach = view.distance + view.lookAhead;
     wf32(ram, game.eye + 0x0u, ex);
     wf32(ram, game.eye + 0x4u, ey);
     wf32(ram, game.eye + 0x8u, ez);
     wf32(ram, game.eye + 0xcu, ex + dx * reach);
     wf32(ram, game.eye + 0x10u, ey + dy * reach);
     wf32(ram, game.eye + 0x14u, ez + dz * reach);
-    applyFov(ram);
+    applyFov(ram, view.fovDegrees);
     if (probe) {
         static unsigned calls = 0;
         if (++calls % 120 == 1)
@@ -262,7 +337,8 @@ inline void service(uint8_t* ram, R5900Context* ctx, PS2Runtime* runtime) {
 }
 
 inline void install(PS2Runtime& runtime, Addresses addresses = File1) {
-    probe = flag("REO_MODERN_CAMERA_PROBE");
+    if (const char* level = std::getenv("REO_MODERN_CAMERA_PROBE"))
+        probe = std::strcmp(level, "1") == 0 || std::strcmp(level, "2") == 0;
     enabled = flag("REO_MODERN_CAMERA");
     if (!probe && !enabled)
         return;
