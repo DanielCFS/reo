@@ -378,16 +378,67 @@ inline void cameraApply(uint8_t* ram, R5900Context* ctx, PS2Runtime* runtime) {
     o0_00375920_0x375920(ram, ctx, runtime);
 }
 
+// REO_MODERN_CAMERA_PROBE=3: every 20 frame services outside free gameplay, write
+// all 32 MiB of guest RAM to modcam_ram_<n>.bin and log the elapsed time
+// (menu reverse engineering; RAM dumps stay in the private run folder).
+inline void snapshotRam(const uint8_t* ram) {
+    static const bool on = [] {
+        const char* value = std::getenv("REO_MODERN_CAMERA_PROBE");
+        return value && std::strcmp(value, "3") == 0;
+    }();
+    static unsigned calls = 0, index = 0;
+    static const auto start = std::chrono::steady_clock::now();
+    if (!on || ram[game.gameState] != 2u || freeGameplay(ram) || ++calls % 20 != 0 || index >= 60)
+        return;
+    char name[64];
+    std::snprintf(name, sizeof(name), "modcam_ram_%03u.bin", index);
+    if (std::FILE* out = std::fopen(name, "wb")) {
+        std::fwrite(ram, 1, 0x2000000u, out);
+        std::fclose(out);
+        std::fprintf(stderr, "[MODCAM-SNAP] %u t=%.3f\n", index,
+                     std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
+        ++index;
+    }
+}
+
+// REO_MODERN_CAMERA_WATCH="0xADDR:len" prints that guest RAM window every 6
+// frame services while it changes (menu reverse engineering).
+inline void watchRam(const uint8_t* ram) {
+    static uint32_t address = 0, length = 0;
+    static bool parsed = false;
+    if (!parsed) {
+        parsed = true;
+        if (const char* text = std::getenv("REO_MODERN_CAMERA_WATCH"))
+            std::sscanf(text, "%x:%x", &address, &length);
+        if (length > 64u || address + length > 0x2000000u)
+            length = 0;
+    }
+    static unsigned calls = 0;
+    static uint8_t last[64] = {};
+    static const auto start = std::chrono::steady_clock::now();
+    if (!length || ++calls % 6 != 0 || std::memcmp(last, ram + address, length) == 0)
+        return;
+    std::memcpy(last, ram + address, length);
+    std::fprintf(stderr, "[MODCAM-WATCH] t=%.3f", std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
+    for (uint32_t i = 0; i < length; ++i)
+        std::fprintf(stderr, " %02x", ram[address + i]);
+    std::fprintf(stderr, "\n");
+}
+
 inline void service(uint8_t* ram, R5900Context* ctx, PS2Runtime* runtime) {
     const bool entry = ctx->pc == game.frameService;
     if (entry && probe)
+        watchRam(ram);
+    if (entry && probe)
         probeFrame(ram);
+    if (entry && probe)
+        snapshotRam(ram);
     originalService(ram, ctx, runtime);
 }
 
 inline void install(PS2Runtime& runtime, Addresses addresses = File1) {
     if (const char* level = std::getenv("REO_MODERN_CAMERA_PROBE"))
-        probe = std::strcmp(level, "1") == 0 || std::strcmp(level, "2") == 0;
+        probe = std::strcmp(level, "1") == 0 || std::strcmp(level, "2") == 0 || std::strcmp(level, "3") == 0;
     enabled = flag("REO_MODERN_CAMERA");
     if (!probe && !enabled)
         return;
